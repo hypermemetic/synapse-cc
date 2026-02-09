@@ -1,0 +1,33 @@
+# Haskell
+dist/
+dist-newstyle/
+.stack-work/
+*.hi
+*.o
+*.dyn_hi
+*.dyn_o
+*.chi
+*.chs.h
+*.prof
+*.aux
+*.hp
+*.eventlog
+cabal.project.local
+cabal.project.local~
+.HTF/
+.ghc.environment.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Generated
+generated/
+.synapse-cache/
+
+# Test outputs
+*.log
