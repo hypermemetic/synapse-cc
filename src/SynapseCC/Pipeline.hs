@@ -101,10 +101,15 @@ generateIR config tools = do
   -- Ensure output directory exists
   createDirectoryIfMissing True outputDir
 
-  -- Build synapse command: synapse -H <host> -P <port> -i <backend>
+  -- Build synapse command: synapse -H <host> -P <port> -i <backend> --generator-info synapse-cc:version
   let host = cfgHost config
       port = cfgPort config
-      args = ["-H", T.unpack host, "-P", T.unpack port, "-i", T.unpack backendName]
+      generatorInfo = "synapse-cc:" <> synapseCCVersion
+      args = [ "-H", T.unpack host
+             , "-P", T.unpack port
+             , "-i", T.unpack backendName
+             , "--generator-info", T.unpack generatorInfo
+             ]
 
   -- Run synapse
   result <- runProcess synapsePath args Nothing debug

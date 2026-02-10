@@ -3,8 +3,11 @@
 
 -- | Core types for synapse-cc
 module SynapseCC.Types
-  ( -- * Configuration
-    Config(..)
+  ( -- * Version Information
+    synapseCCVersion
+
+    -- * Configuration
+  , Config(..)
   , Target(..)
   , Backend(..)
   , Options(..)
@@ -29,6 +32,14 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
 import System.FilePath (FilePath)
+
+-- ============================================================================
+-- Version Information
+-- ============================================================================
+
+-- | synapse-cc version (from cabal file: synapse-cc.cabal)
+synapseCCVersion :: Text
+synapseCCVersion = "0.1.0.0"
 
 -- ============================================================================
 -- Configuration
