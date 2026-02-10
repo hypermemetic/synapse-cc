@@ -44,11 +44,15 @@ runProcess exe args mbCwd debug = do
 
   when debug $ do
     unless (T.null stdout) $ do
-      putStrLn "  Stdout:"
-      TIO.putStrLn $ "    " <> stdout
+      let len = T.length stdout
+      if len > 1000
+        then putStrLn $ "  Stdout: <large output, " ++ show len ++ " chars, truncated>"
+        else do
+          putStrLn "  Stdout:"
+          putStrLn $ "    " ++ T.unpack stdout
     unless (T.null stderr) $ do
       putStrLn "  Stderr:"
-      TIO.putStrLn $ "    " <> stderr
+      putStrLn $ "    " ++ T.unpack stderr
 
   pure $ ProcessResult exitCode stdout stderr
 
@@ -72,11 +76,15 @@ runProcessWithInput exe args mbCwd input debug = do
 
   when debug $ do
     unless (T.null stdout) $ do
-      putStrLn "  Stdout:"
-      TIO.putStrLn $ "    " <> stdout
+      let len = T.length stdout
+      if len > 1000
+        then putStrLn $ "  Stdout: <large output, " ++ show len ++ " chars, truncated>"
+        else do
+          putStrLn "  Stdout:"
+          putStrLn $ "    " ++ T.unpack stdout
     unless (T.null stderr) $ do
       putStrLn "  Stderr:"
-      TIO.putStrLn $ "    " <> stderr
+      putStrLn $ "    " ++ T.unpack stderr
 
   pure $ ProcessResult exitCode stdout stderr
 

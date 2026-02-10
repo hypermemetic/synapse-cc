@@ -4,6 +4,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Exit (exitFailure, exitSuccess)
+import System.IO (stdout, stderr, hSetEncoding, utf8)
 
 import SynapseCC.CLI
 import SynapseCC.Discover
@@ -17,6 +18,10 @@ import SynapseCC.Types
 
 main :: IO ()
 main = do
+  -- Set UTF-8 encoding for stdout/stderr to handle Unicode characters
+  hSetEncoding stdout utf8
+  hSetEncoding stderr utf8
+
   -- Parse command-line arguments
   config <- parseArgs
 
