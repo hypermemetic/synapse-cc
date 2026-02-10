@@ -107,8 +107,9 @@ generateIR config tools = do
       generatorInfo = "synapse-cc:" <> synapseCCVersion
       args = [ "-H", T.unpack host
              , "-P", T.unpack port
-             , "-i", T.unpack backendName
              , "--generator-info", T.unpack generatorInfo
+             , "-i"
+             , T.unpack backendName
              ]
 
   -- Run synapse
