@@ -81,7 +81,6 @@ generateIR config tools = do
   let debug = optDebug (cfgOptions config)
       synapsePath = toolPathToFilePath (toolSynapse tools)
       Backend backendName = cfgBackend config
-      url = cfgUrl config
       outputDir = optOutput (cfgOptions config)
       irFile = outputDir </> "ir.json"
 
@@ -89,8 +88,8 @@ generateIR config tools = do
   createDirectoryIfMissing True outputDir
 
   -- Build synapse command: synapse -H <host> -P <port> -i <backend>
-  -- Parse URL to extract host and port
-  let (host, port) = parseWebSocketUrl url
+  let host = cfgHost config
+      port = cfgPort config
       args = ["-H", T.unpack host, "-P", T.unpack port, "-i", T.unpack backendName]
 
   -- Run synapse
@@ -135,14 +134,9 @@ generateCode config tools irPath = do
         Python -> "python"
         Rust -> "rust"
 
-      bundleTransportArg = if optBundleTransport opts
-        then "--bundle-transport=true"
-        else "--bundle-transport=false"
-
       args =
         [ "--target", targetArg
         , "--output", outputDir
-        , bundleTransportArg
         , unIRPath irPath
         ]
 
@@ -156,17 +150,3 @@ generateCode config tools irPath = do
     ExitFailure code -> do
       pure $ Left $ HubCodegenError (prStderr result) code
 
--- ============================================================================
--- URL Parsing
--- ============================================================================
-
--- | Parse WebSocket URL to extract host and port
--- Handles ws://host:port and wss://host:port
-parseWebSocketUrl :: Text -> (Text, Text)
-parseWebSocketUrl url =
-  let stripped = T.replace "ws://" "" $ T.replace "wss://" "" url
-      parts = T.splitOn ":" stripped
-  in case parts of
-       [host, port] -> (host, port)
-       [host] -> (host, "4444")  -- Default port
-       _ -> ("localhost", "4444")  -- Fallback

@@ -37,7 +37,7 @@ main = do
       logSuccess "Found all required tools"
 
       -- Connect to backend
-      logStep $ "Connecting to " <> backendName (cfgBackend config) <> " at " <> cfgUrl config <> "..."
+      logStep $ "Connecting to " <> backendName (cfgBackend config) <> " via registry at " <> cfgHost config <> ":" <> cfgPort config <> "..."
 
       -- Run the pipeline
       pipelineResult <- runPipeline config tools

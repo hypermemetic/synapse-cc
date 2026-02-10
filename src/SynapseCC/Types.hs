@@ -38,7 +38,8 @@ import System.FilePath (FilePath)
 data Config = Config
   { cfgTarget         :: !Target
   , cfgBackend        :: !Backend
-  , cfgUrl            :: !Text
+  , cfgHost           :: !Text
+  , cfgPort           :: !Text
   , cfgOptions        :: !Options
   } deriving stock (Show, Eq, Generic)
 
@@ -76,7 +77,7 @@ defaultOptions = Options
   , optBundleTransport = True
   , optInstallDeps     = True
   , optBuild           = True
-  , optRunTests        = True
+  , optRunTests        = False
   , optCacheDir        = "~/.plexus/cache"
   , optForce           = False
   , optWatch           = False

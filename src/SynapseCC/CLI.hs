@@ -30,7 +30,8 @@ configParser :: Parser Config
 configParser = Config
   <$> targetParser
   <*> backendParser
-  <*> urlParser
+  <*> hostParser
+  <*> portParser
   <*> optionsParser
 
 -- | Parse target language
@@ -56,11 +57,26 @@ backendParser = Backend . T.pack <$> argument str
  <> help "Backend identifier (substrate, plexus, synapse, etc.)"
   )
 
--- | Parse WebSocket URL
-urlParser :: Parser Text
-urlParser = T.pack <$> argument str
-  ( metavar "URL"
- <> help "Backend WebSocket URL (e.g., ws://localhost:4444)"
+-- | Parse registry host
+hostParser :: Parser Text
+hostParser = T.pack <$> option str
+  ( long "host"
+ <> short 'H'
+ <> metavar "HOST"
+ <> value "127.0.0.1"
+ <> showDefault
+ <> help "Registry/discovery host"
+  )
+
+-- | Parse registry port
+portParser :: Parser Text
+portParser = T.pack <$> option str
+  ( long "port"
+ <> short 'P'
+ <> metavar "PORT"
+ <> value "4444"
+ <> showDefault
+ <> help "Registry/discovery port"
   )
 
 -- | Parse options
