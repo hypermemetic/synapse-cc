@@ -46,30 +46,44 @@ runPipeline config tools = do
         Right genPath -> do
           when debug $ putStrLn $ "  [+] Code generated at " ++ unGeneratedPath genPath
 
-          -- Step 3: Language-specific build (if enabled)
-          compiledResult <- if optBuild (cfgOptions config)
+          -- Step 3: Install dependencies (if enabled)
+          installResult <- if optInstallDeps (cfgOptions config)
             then do
-              when debug $ putStrLn "\n[*] Building..."
-              -- TODO: Implement language-specific build
-              pure $ Right $ CompiledPath $ unGeneratedPath genPath
-            else
-              pure $ Right $ CompiledPath $ unGeneratedPath genPath
+              when debug $ putStrLn "\n[*] Installing dependencies..."
+              Language.installDependencies (cfgTarget config) genPath debug
+            else do
+              when debug $ putStrLn "\n[*] Skipping dependency installation (--no-install)"
+              pure $ Right ()
 
-          case compiledResult of
+          case installResult of
             Left err -> pure $ Left err
-            Right compiledPath -> do
-              -- Step 4: Run tests (if enabled)
-              if optRunTests (cfgOptions config)
+            Right () -> do
+
+              -- Step 4: Build project (if enabled)
+              buildResult <- if optBuild (cfgOptions config)
                 then do
-                  when debug $ putStrLn "\n[*] Running smoke tests..."
-                  testResult <- Language.runTests (cfgTarget config) genPath debug
-                  case testResult of
-                    Left err -> pure $ Left err
-                    Right () -> do
-                      when debug $ putStrLn "  [+] All tests passed"
+                  when debug $ putStrLn "\n[*] Building project..."
+                  Language.buildProject (cfgTarget config) genPath debug
+                else do
+                  when debug $ putStrLn "\n[*] Skipping build (--no-build)"
+                  pure $ Right $ CompiledPath $ unGeneratedPath genPath
+
+              case buildResult of
+                Left err -> pure $ Left err
+                Right compiledPath -> do
+
+                  -- Step 5: Run tests (if enabled)
+                  if optRunTests (cfgOptions config)
+                    then do
+                      when debug $ putStrLn "\n[*] Running smoke tests..."
+                      testResult <- Language.runTests (cfgTarget config) genPath debug
+                      case testResult of
+                        Left err -> pure $ Left err
+                        Right () -> do
+                          when debug $ putStrLn "  [+] All tests passed"
+                          pure $ Right compiledPath
+                    else
                       pure $ Right compiledPath
-                else
-                  pure $ Right compiledPath
 
 -- ============================================================================
 -- IR Generation
