@@ -22,12 +22,22 @@ module SynapseCC.Types
   , GeneratedPath(..)
   , CompiledPath(..)
 
+    -- * Cache Types
+  , ToolchainVersions(..)
+  , IRPluginCache(..)
+  , CodePluginCache(..)
+  , IRCacheManifest(..)
+  , CodeCacheManifest(..)
+  , CacheResult(..)
+  , CacheMissReason(..)
+
     -- * Errors
   , SynapseCCError(..)
   , formatError
   ) where
 
 import Data.Aeson (FromJSON, ToJSON)
+import Data.Map.Strict (Map)
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
@@ -89,7 +99,7 @@ defaultOptions = Options
   , optInstallDeps     = True
   , optBuild           = True
   , optRunTests        = False
-  , optCacheDir        = "~/.plexus/cache"
+  , optCacheDir        = "~/.cache/plexus-codegen"
   , optForce           = False
   , optWatch           = False
   , optDebug           = False
@@ -126,6 +136,74 @@ newtype GeneratedPath = GeneratedPath { unGeneratedPath :: FilePath }
 
 -- | Path to compiled output
 newtype CompiledPath = CompiledPath { unCompiledPath :: FilePath }
+  deriving stock (Show, Eq)
+
+-- ============================================================================
+-- Cache Types
+-- ============================================================================
+
+-- | Toolchain version information for cache invalidation
+data ToolchainVersions = ToolchainVersions
+  { tvSynapseCC   :: !Text
+  , tvSynapse     :: !Text
+  , tvHubCodegen  :: !(Maybe Text)  -- Only known after codegen
+  } deriving stock (Show, Eq, Generic)
+    deriving anyclass (FromJSON, ToJSON)
+
+-- | Cache entry for a single plugin's IR
+data IRPluginCache = IRPluginCache
+  { ipcIRHash       :: !Text         -- Hash of the generated IR for this plugin
+  , ipcSchemaHash   :: !Text         -- Hash of the source schema (V2 granular)
+  , ipcDependencies :: ![Text]       -- List of plugin dependencies
+  , ipcCachedAt     :: !Text         -- ISO 8601 timestamp
+  } deriving stock (Show, Eq, Generic)
+    deriving anyclass (FromJSON, ToJSON)
+
+-- | Cache entry for a single plugin's generated code
+data CodePluginCache = CodePluginCache
+  { cpcIRHash    :: !Text            -- Hash of the IR that generated this code
+  , cpcCachedAt  :: !Text            -- ISO 8601 timestamp
+  } deriving stock (Show, Eq, Generic)
+    deriving anyclass (FromJSON, ToJSON)
+
+-- | Cache manifest for IR (synapse/ir/manifest.json)
+data IRCacheManifest = IRCacheManifest
+  { ircmVersion    :: !Text
+  , ircmIRVersion  :: !Text
+  , ircmToolchain  :: !ToolchainVersions
+  , ircmUpdatedAt  :: !Text
+  , ircmPlugins    :: !(Map Text IRPluginCache)
+  } deriving stock (Show, Eq, Generic)
+    deriving anyclass (FromJSON, ToJSON)
+
+-- | Cache manifest for generated code (hub-codegen/typescript/manifest.json)
+data CodeCacheManifest = CodeCacheManifest
+  { ccmVersion    :: !Text
+  , ccmTarget     :: !Text
+  , ccmToolchain  :: !ToolchainVersions
+  , ccmUpdatedAt  :: !Text
+  , ccmPlugins    :: !(Map Text CodePluginCache)
+  } deriving stock (Show, Eq, Generic)
+    deriving anyclass (FromJSON, ToJSON)
+
+-- | Reason for cache miss
+data CacheMissReason
+  = ToolVersionChanged      -- Tool versions don't match
+  | SchemaHashChanged       -- Source schema changed
+  | IRHashChanged           -- IR changed
+  | DependencyInvalidated   -- Transitive dependency changed
+  | ManifestNotFound        -- No cache manifest exists
+  | ManifestCorrupted       -- Manifest exists but is invalid
+  deriving stock (Show, Eq)
+
+-- | Result of cache validation
+data CacheResult
+  = FullCacheHit
+    -- ^ All plugins are cached and valid
+  | PartialCacheHit ![Text] ![Text]
+    -- ^ Some plugins valid (first list), some invalid (second list)
+  | CacheMiss !CacheMissReason
+    -- ^ Cache invalid, must regenerate everything
   deriving stock (Show, Eq)
 
 -- ============================================================================

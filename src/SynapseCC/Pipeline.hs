@@ -8,6 +8,7 @@ module SynapseCC.Pipeline
 import Control.Monad (unless, when)
 import Data.Aeson (FromJSON, eitherDecodeStrict)
 import qualified Data.ByteString as BS
+import Data.Monoid (mempty)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -20,6 +21,7 @@ import SynapseCC.Types
 import SynapseCC.Process
 import SynapseCC.Discover
 import qualified SynapseCC.Language as Language
+import qualified SynapseCC.Cache as Cache
 
 -- ============================================================================
 -- Pipeline Orchestration
@@ -28,6 +30,35 @@ import qualified SynapseCC.Language as Language
 -- | Run the complete pipeline
 runPipeline :: Config -> ToolLocations -> IO (Either SynapseCCError CompiledPath)
 runPipeline config tools = do
+  let debug = optDebug (cfgOptions config)
+
+  -- Step 0: Check cache (unless --force is set)
+  cacheResult <- Cache.validateCache config
+  case cacheResult of
+    FullCacheHit -> do
+      when debug $ putStrLn "\n[+] Full cache hit (versions match)"
+      when debug $ putStrLn "  [*] Using cached output"
+      -- TODO: Copy cached code to output directory if needed
+      let outputPath = optOutput (cfgOptions config)
+      pure $ Right $ CompiledPath outputPath
+
+    CacheMiss reason -> do
+      when debug $ putStrLn $ "\n[!] Cache miss: " ++ show reason
+      when debug $ putStrLn "  [*] Regenerating..."
+      runFullPipeline config tools
+
+    PartialCacheHit valid invalid -> do
+      when debug $ putStrLn "\n[*] Partial cache hit"
+      when debug $ putStrLn $ "  [+] Valid plugins: " ++ show valid
+      when debug $ putStrLn $ "  [!] Invalid plugins: " ++ show invalid
+      when debug $ putStrLn "  [*] Regenerating invalid plugins..."
+      -- TODO: Implement partial regeneration
+      -- For now, do full regeneration
+      runFullPipeline config tools
+
+-- | Run the full pipeline without cache
+runFullPipeline :: Config -> ToolLocations -> IO (Either SynapseCCError CompiledPath)
+runFullPipeline config tools = do
   let debug = optDebug (cfgOptions config)
 
   -- Step 1: Generate IR
@@ -81,9 +112,22 @@ runPipeline config tools = do
                         Left err -> pure $ Left err
                         Right () -> do
                           when debug $ putStrLn "  [+] All tests passed"
+                          writeCache config compiledPath
                           pure $ Right compiledPath
-                    else
+                    else do
+                      writeCache config compiledPath
                       pure $ Right compiledPath
+
+-- | Write cache manifests after successful generation
+writeCache :: Config -> CompiledPath -> IO ()
+writeCache config _compiledPath = do
+  let debug = optDebug (cfgOptions config)
+  when debug $ putStrLn "\n[*] Writing cache manifests..."
+  -- TODO: Implement cache writing with actual plugin hashes
+  -- For now, write empty cache manifests to enable basic caching
+  Cache.writeIRCacheManifest (cfgOptions config) (cfgBackend config) mempty
+  Cache.writeCodeCacheManifest (cfgOptions config) (cfgBackend config) (cfgTarget config) mempty
+  when debug $ putStrLn "  [+] Cache manifests written"
 
 -- ============================================================================
 -- IR Generation
