@@ -6,14 +6,17 @@ module SynapseCC.Pipeline
   ) where
 
 import Control.Monad (unless, when)
-import Data.Aeson (FromJSON, eitherDecodeStrict)
+import Data.Aeson (FromJSON, eitherDecodeStrict, eitherDecodeFileStrict)
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
+import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Monoid (mempty)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import GHC.Generics (Generic)
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeDirectory)
 
@@ -122,12 +125,98 @@ runFullPipeline config tools = do
 writeCache :: Config -> CompiledPath -> IO ()
 writeCache config _compiledPath = do
   let debug = optDebug (cfgOptions config)
+      outputDir = optOutput (cfgOptions config)
   when debug $ putStrLn "\n[*] Writing cache manifests..."
-  -- TODO: Implement cache writing with actual plugin hashes
-  -- For now, write empty cache manifests to enable basic caching
-  Cache.writeIRCacheManifest (cfgOptions config) (cfgBackend config) mempty
-  Cache.writeCodeCacheManifest (cfgOptions config) (cfgBackend config) (cfgTarget config) mempty
+
+  -- Read file hashes from .codegen-metadata.json
+  fileHashesMap <- readFileHashes outputDir debug
+
+  -- Read IR to extract plugin hashes
+  irPluginCaches <- readIRPluginHashes outputDir debug
+
+  -- Write IR cache manifest with plugin hashes
+  Cache.writeIRCacheManifest (cfgOptions config) (cfgBackend config) irPluginCaches
+
+  -- Write code cache with file hashes
+  -- Convert flat file hash map to per-plugin structure
+  let pluginCaches = buildPluginCaches fileHashesMap
+  Cache.writeCodeCacheManifest (cfgOptions config) (cfgBackend config) (cfgTarget config) pluginCaches
+
   when debug $ putStrLn "  [+] Cache manifests written"
+
+-- | Read file hashes from .codegen-metadata.json
+readFileHashes :: FilePath -> Bool -> IO (Map.Map Text Text)
+readFileHashes outputDir debug = do
+  let metadataPath = outputDir </> ".codegen-metadata.json"
+  exists <- doesFileExist metadataPath
+  if not exists
+    then do
+      when debug $ putStrLn "  [!] .codegen-metadata.json not found, skipping file hashes"
+      pure Map.empty
+    else do
+      result <- eitherDecodeFileStrict metadataPath
+      case result of
+        Left err -> do
+          when debug $ putStrLn $ "  [!] Failed to parse metadata: " ++ err
+          pure Map.empty
+        Right (metadata :: CodegenMetadata) -> do
+          when debug $ putStrLn $ "  [+] Read " ++ show (Map.size (ciFileHashes (cmCache metadata))) ++ " file hashes"
+          pure $ ciFileHashes (cmCache metadata)
+
+-- | Read IR plugin hashes from ir.json
+readIRPluginHashes :: FilePath -> Bool -> IO (Map.Map Text IRPluginCache)
+readIRPluginHashes outputDir debug = do
+  let irPath = outputDir </> "ir.json"
+  exists <- doesFileExist irPath
+  if not exists
+    then do
+      when debug $ putStrLn "  [!] ir.json not found, skipping IR plugin hashes"
+      pure Map.empty
+    else do
+      result <- eitherDecodeFileStrict irPath
+      case result of
+        Left err -> do
+          when debug $ putStrLn $ "  [!] Failed to parse IR: " ++ err
+          pure Map.empty
+        Right (irData :: IRData) -> do
+          let pluginHashes = fromMaybe Map.empty (irdPluginHashes irData)
+              pluginCaches = Map.mapWithKey (buildIRPluginCache pluginHashes) (irdPlugins irData)
+          when debug $ putStrLn $ "  [+] Extracted hashes for " ++ show (Map.size pluginCaches) ++ " plugins"
+          pure pluginCaches
+
+-- | Build an IRPluginCache entry from plugin info and hashes
+buildIRPluginCache :: Map.Map Text PluginHashInfo -> Text -> [Text] -> IRPluginCache
+buildIRPluginCache hashMap pluginName _methods =
+  case Map.lookup pluginName hashMap of
+    Just hashes -> IRPluginCache
+      { ipcIRHash = ""  -- TODO: Compute IR hash (WS2)
+      , ipcSchemaHash = phiHash hashes
+      , ipcSelfHash = phiSelfHash hashes
+      , ipcChildrenHash = phiChildrenHash hashes
+      , ipcDependencies = []  -- TODO: Extract dependencies from IR
+      , ipcCachedAt = ""  -- Will be set by writeIRCacheManifest
+      }
+    Nothing -> IRPluginCache
+      { ipcIRHash = ""
+      , ipcSchemaHash = ""  -- No hash info available
+      , ipcSelfHash = ""
+      , ipcChildrenHash = ""
+      , ipcDependencies = []
+      , ipcCachedAt = ""
+      }
+
+-- | Build per-plugin cache entries from flat file hash map
+-- For now, group all files into a single "default" plugin entry
+-- This will be improved when we implement per-plugin hash tracking
+buildPluginCaches :: Map.Map Text Text -> Map.Map Text CodePluginCache
+buildPluginCaches fileHashes =
+  if Map.null fileHashes
+    then Map.empty
+    else Map.singleton "default" CodePluginCache
+      { cpcIRHash = ""  -- Will be populated when WS1 is complete
+      , cpcFileHashes = fileHashes
+      , cpcCachedAt = ""  -- Will be set by writeCodeCacheManifest
+      }
 
 -- ============================================================================
 -- IR Generation
@@ -173,9 +262,25 @@ generateIR config tools = do
     ExitFailure code -> do
       pure $ Left $ SynapseError (prStderr result) code
 
--- | Minimal IR structure for validation (we don't need the full structure)
+-- | IR structure for reading plugin hashes
+-- We only need the fields relevant for caching
 data IRData = IRData
-  { irVersion :: !Text
+  { irdVersion      :: !Text
+  , irdPlugins      :: !(Map.Map Text [Text])
+  , irdPluginHashes :: !(Maybe (Map.Map Text PluginHashInfo))
+  } deriving stock (Show, Generic)
+
+instance FromJSON IRData where
+  parseJSON = Aeson.withObject "IRData" $ \o -> IRData
+    <$> o Aeson..: "irVersion"
+    <*> o Aeson..: "irPlugins"
+    <*> o Aeson..:? "irPluginHashes"
+
+-- | Plugin hash information from IR
+data PluginHashInfo = PluginHashInfo
+  { phiHash         :: !Text
+  , phiSelfHash     :: !Text
+  , phiChildrenHash :: !Text
   } deriving stock (Show, Generic)
     deriving anyclass (FromJSON)
 

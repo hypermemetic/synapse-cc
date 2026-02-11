@@ -23,6 +23,7 @@ library
                     , SynapseCC.Pipeline
                     , SynapseCC.Process
                     , SynapseCC.Cache
+                    , SynapseCC.Dependency
                     , SynapseCC.Language
                     , SynapseCC.Logging
     build-depends:    base >= 4.14 && < 5
