@@ -37,8 +37,6 @@ discoverTools opts = do
   case synapsePath of
     Nothing -> pure $ Left $ ToolNotFound "synapse" synapseSuggestions
     Just synapseToolPath -> do
-      logInfo $ "  synapse     " <> T.pack (toolPathToFilePath synapseToolPath)
-
       hubCodegenPath <- case optHubCodegenPath opts of
         Just explicit -> resolveExplicit "hub-codegen" explicit debug
         Nothing       -> findTool debug "hub-codegen" hubCodegenFallbackPaths
@@ -46,14 +44,12 @@ discoverTools opts = do
       case hubCodegenPath of
         Nothing -> pure $ Left $ ToolNotFound "hub-codegen" hubCodegenSuggestions
         Just hubCodegenToolPath -> do
-          logInfo $ "  hub-codegen " <> T.pack (toolPathToFilePath hubCodegenToolPath)
-
           -- Run --version for each discovered tool
           synapseVer    <- getToolVersion (toolPathToFilePath synapseToolPath)
           hubCodegenVer <- getToolVersion (toolPathToFilePath hubCodegenToolPath)
 
-          logDebug debug $ "  synapse version:     " <> synapseVer
-          logDebug debug $ "  hub-codegen version: " <> hubCodegenVer
+          logInfo $ "  synapse     " <> T.pack (toolPathToFilePath synapseToolPath) <> "  (" <> synapseVer <> ")"
+          logInfo $ "  hub-codegen " <> T.pack (toolPathToFilePath hubCodegenToolPath) <> "  (" <> hubCodegenVer <> ")"
 
           pure $ Right $ ToolLocations
             { toolSynapse           = synapseToolPath
@@ -124,11 +120,14 @@ getToolVersion exe = do
   case result of
     Left _             -> pure "unknown"
     Right (_, out, _) ->
-      let firstLine = head (lines out ++ [""])
-          stripped  = case T.unpack (T.strip (T.pack firstLine)) of
-            ('v':rest) -> rest
-            other      -> other
-          ver = T.strip $ T.pack stripped
+      let firstLine = T.strip $ T.pack $ head (lines out ++ [""])
+          -- Take last word (handles "hub-codegen 0.1.0" and "3.5.0")
+          lastWord  = case reverse (T.words firstLine) of
+                        (w:_) -> w
+                        []    -> ""
+          ver = case T.unpack lastWord of
+                  ('v':rest) -> T.pack rest
+                  _          -> lastWord
       in pure $ if T.null ver then "unknown" else ver
 
 -- ============================================================================
