@@ -31,3 +31,8 @@ generated/
 
 # Test outputs
 *.log
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3

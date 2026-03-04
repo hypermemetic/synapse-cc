@@ -218,18 +218,7 @@ setupTestEnv = do
             }
         ExitFailure code -> do
           let output = if null stderr then stdout else stderr
-          putStrLn $ "WARNING: Pipeline failed (exit " ++ show code ++ "):"
-          putStrLn $ take 500 output
-          putStrLn "Falling back to existing generated/ directory"
-          genExists <- doesDirectoryExist "generated"
-          unless genExists $
-            fail "Pipeline failed and no generated/ directory found"
-          return TestEnv
-            { teOutputDir = "generated"
-            , tePipelineRan = False
-            , tePipelineExit = exit
-            , tePipelineError = take 300 output
-            }
+          fail $ "Pipeline failed (exit " ++ show code ++ "): " ++ take 500 output
 
 main :: IO ()
 main = do
@@ -240,11 +229,8 @@ main = do
     -- Section 1: Pipeline
     -- ═══════════════════════════════════════════
     describe "Pipeline" $ do
-      it "exit code is 0 (or fallback used)" $ do
-        if tePipelineRan env
-          then tePipelineExit env `shouldBe` ExitSuccess
-          else pendingWith $ "pipeline failed, using generated/ fallback: "
-                 ++ tePipelineError env
+      it "exit code is 0" $ do
+        tePipelineExit env `shouldBe` ExitSuccess
 
       it "output directory exists" $ do
         exists <- doesDirectoryExist dir
