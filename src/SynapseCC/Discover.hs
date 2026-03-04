@@ -3,13 +3,19 @@ module SynapseCC.Discover
   ( discoverTools
   , findTool
   , toolPathToFilePath
+  , findInDistNewstyle
   ) where
 
-import Control.Monad (when)
+import Control.Exception (catch, SomeException, try)
+import Control.Monad (forM, when)
+import Data.List (sortBy, maximumBy)
+import Data.Maybe (catMaybes)
+import Data.Ord (comparing, Down(..))
 import Data.Text (Text)
 import qualified Data.Text as T
-import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
+import System.Directory (doesFileExist, doesDirectoryExist, findExecutable, getHomeDirectory, listDirectory, getModificationTime)
 import System.FilePath ((</>))
+import System.Process (readProcess)
 
 import SynapseCC.Logging (logDebug, logInfo)
 import SynapseCC.Types
@@ -41,9 +47,18 @@ discoverTools opts = do
         Just hubCodegenToolPath -> do
           logInfo $ "  hub-codegen " <> T.pack (toolPathToFilePath hubCodegenToolPath)
 
+          -- Run --version for each discovered tool
+          synapseVer    <- getToolVersion (toolPathToFilePath synapseToolPath)
+          hubCodegenVer <- getToolVersion (toolPathToFilePath hubCodegenToolPath)
+
+          logDebug debug $ "  synapse version:     " <> synapseVer
+          logDebug debug $ "  hub-codegen version: " <> hubCodegenVer
+
           pure $ Right $ ToolLocations
-            { toolSynapse    = synapseToolPath
-            , toolHubCodegen = hubCodegenToolPath
+            { toolSynapse           = synapseToolPath
+            , toolHubCodegen        = hubCodegenToolPath
+            , toolSynapseVersion    = synapseVer
+            , toolHubCodegenVersion = hubCodegenVer
             }
 
 -- | Resolve an explicitly-provided path, failing clearly if it doesn't exist
@@ -57,8 +72,8 @@ resolveExplicit name path debug = do
       pure Nothing
 
 -- | Find a tool: check PATH first, then fallback paths
-findTool :: Bool -> String -> (FilePath -> [FilePath]) -> IO (Maybe ToolPath)
-findTool debug name fallbacksF = do
+findTool :: Bool -> String -> IO [FilePath] -> IO (Maybe ToolPath)
+findTool debug name fallbacksIO = do
   -- Check PATH first (i.e. `which <name>`)
   mbWhich <- findExecutable name
   case mbWhich of
@@ -67,8 +82,8 @@ findTool debug name fallbacksF = do
       pure $ Just $ SystemPath path
     Nothing -> do
       logDebug debug $ "  " <> T.pack name <> ": not in PATH, searching fallback locations..."
-      home <- getHomeDirectory
-      tryPaths (fallbacksF home)
+      paths <- fallbacksIO
+      tryPaths paths
   where
     tryPaths [] = pure Nothing
     tryPaths (path:rest) = do
@@ -99,36 +114,114 @@ toolPathToFilePath = \case
   SystemPath path -> path
   PlexusBin path  -> path
 
+-- | Run a tool with @--version@ and return the version string.
+-- Strips a leading "v" and takes only the first line.
+-- Returns @"unknown"@ if the call fails for any reason.
+getToolVersion :: FilePath -> IO Text
+getToolVersion exe = do
+  result <- try (readProcess exe ["--version"] "") :: IO (Either SomeException String)
+  case result of
+    Left _   -> pure "unknown"
+    Right out ->
+      let firstLine = head (lines out ++ [""])
+          stripped  = case T.unpack (T.strip (T.pack firstLine)) of
+            ('v':rest) -> rest
+            other      -> other
+      in pure $ T.strip $ T.pack stripped
+
+-- ============================================================================
+-- dist-newstyle Glob Search
+-- ============================================================================
+
+-- | Search dist-newstyle for a built executable, returning the most recently
+-- modified match (newest build wins).
+--
+-- Walks the pattern:
+--   <root>/dist-newstyle/build/*\/ghc-*\/<pkg>-*\/x\/<exe>\/build\/<exe>\/<exe>
+findInDistNewstyle :: FilePath  -- ^ project root (e.g. "../synapse")
+                   -> String    -- ^ executable name (e.g. "synapse")
+                   -> IO (Maybe FilePath)
+findInDistNewstyle root exe = do
+  let buildDir = root </> "dist-newstyle" </> "build"
+  exists <- doesDirectoryExist buildDir
+  if not exists
+    then pure Nothing
+    else do
+      -- Level 1: arch dirs (e.g. aarch64-linux, x86_64-darwin)
+      archDirs <- safeListDirectory buildDir
+      candidates <- fmap concat $ forM archDirs $ \arch -> do
+        let archPath = buildDir </> arch
+        isDir <- doesDirectoryExist archPath
+        if not isDir then pure [] else do
+
+          -- Level 2: ghc-* dirs
+          ghcDirs <- safeListDirectory archPath
+          fmap concat $ forM ghcDirs $ \ghcDir -> do
+            if not ("ghc-" `isPrefixOfStr` ghcDir) then pure [] else do
+              let ghcPath = archPath </> ghcDir
+
+              -- Level 3: <pkg>-* dirs
+              pkgDirs <- safeListDirectory ghcPath
+              fmap concat $ forM pkgDirs $ \pkgDir -> do
+                let pkgPath = ghcPath </> pkgDir
+                isDir2 <- doesDirectoryExist pkgPath
+                if not isDir2 then pure [] else do
+
+                  -- Level 4: x/<exe>/build/<exe>/<exe>
+                  let candidate = pkgPath </> "x" </> exe </> "build" </> exe </> exe
+                  exists2 <- doesFileExist candidate
+                  if exists2 then pure [candidate] else pure []
+
+      case candidates of
+        []  -> pure Nothing
+        [c] -> pure $ Just c
+        cs  -> do
+          -- Pick the most recently modified binary
+          withTimes <- forM cs $ \c -> do
+            t <- getModificationTime c
+            pure (t, c)
+          pure $ Just $ snd $ maximumBy (comparing fst) withTimes
+  where
+    isPrefixOfStr prefix str = take (length prefix) str == prefix
+
+    safeListDirectory dir =
+      listDirectory dir `catch` \(_ :: SomeException) -> pure []
+
 -- ============================================================================
 -- Fallback Search Paths (used only when not found in PATH)
 -- ============================================================================
 
--- | Fallback paths for synapse (checked if not in PATH)
-synapseFallbackPaths :: FilePath -> [FilePath]
-synapseFallbackPaths home =
-  [ -- Local development builds
-    "../synapse/dist-newstyle/build/aarch64-linux/ghc-9.4.8/plexus-synapse-0.2.0.0/x/synapse/build/synapse/synapse"
-  , "../synapse/dist-newstyle/build/x86_64-linux/ghc-9.4.8/plexus-synapse-0.2.0.0/x/synapse/build/synapse/synapse"
-  , "../../synapse/dist-newstyle/build/aarch64-linux/ghc-9.4.8/plexus-synapse-0.2.0.0/x/synapse/build/synapse/synapse"
-  , "../../synapse/dist-newstyle/build/x86_64-linux/ghc-9.4.8/plexus-synapse-0.2.0.0/x/synapse/build/synapse/synapse"
-    -- Install locations
-  , home </> ".plexus/bin/synapse"
-  , home </> ".local/bin/synapse"
-  , home </> ".cabal/bin/synapse"
-  ]
+-- | Fallback paths for synapse (checked if not in PATH).
+-- Uses glob-based dist-newstyle search to handle any arch/GHC version.
+synapseFallbackPaths :: IO [FilePath]
+synapseFallbackPaths = do
+  home <- getHomeDirectory
+  -- Search dist-newstyle trees relative to common project layouts
+  mb1 <- findInDistNewstyle "../synapse" "synapse"
+  mb2 <- findInDistNewstyle "../../synapse" "synapse"
+  let devPaths = catMaybes [mb1, mb2]
+  let installPaths =
+        [ home </> ".plexus/bin/synapse"
+        , home </> ".local/bin/synapse"
+        , home </> ".cabal/bin/synapse"
+        ]
+  pure $ devPaths ++ installPaths
 
 -- | Fallback paths for hub-codegen (checked if not in PATH)
-hubCodegenFallbackPaths :: FilePath -> [FilePath]
-hubCodegenFallbackPaths home =
-  [ -- Local development builds
-    "../hub-codegen/target/release/hub-codegen"
-  , "../hub-codegen/target/debug/hub-codegen"
-  , "../../hub-codegen/target/release/hub-codegen"
-  , "../../hub-codegen/target/debug/hub-codegen"
-    -- Install locations
-  , home </> ".plexus/bin/hub-codegen"
-  , home </> ".cargo/bin/hub-codegen"
-  ]
+hubCodegenFallbackPaths :: IO [FilePath]
+hubCodegenFallbackPaths = do
+  home <- getHomeDirectory
+  let devPaths =
+        [ "../hub-codegen/target/release/hub-codegen"
+        , "../hub-codegen/target/debug/hub-codegen"
+        , "../../hub-codegen/target/release/hub-codegen"
+        , "../../hub-codegen/target/debug/hub-codegen"
+        ]
+      installPaths =
+        [ home </> ".plexus/bin/hub-codegen"
+        , home </> ".cargo/bin/hub-codegen"
+        ]
+  pure $ devPaths ++ installPaths
 
 -- ============================================================================
 -- Suggestions

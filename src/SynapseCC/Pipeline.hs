@@ -17,12 +17,12 @@ import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
 import Data.Time.Format (formatTime, defaultTimeLocale)
 import GHC.Generics (Generic)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 
 import SynapseCC.Benchmark (timeStep, loadBaseline, saveBaseline, baselinePath, reportBenchmarks)
-import SynapseCC.Logging (logDebug, logStep, logSuccess)
+import SynapseCC.Logging (logDebug, logInfo, logStep, logSuccess)
 import SynapseCC.Types
 import SynapseCC.Process
 import SynapseCC.Discover
@@ -40,14 +40,23 @@ runPipeline config tools = do
   let debug = optDebug (cfgOptions config)
 
   -- Step 0: Check cache (unless --force is set)
-  cacheResult <- Cache.validateCache config
+  cacheResult <- Cache.validateCache config tools
   case cacheResult of
     FullCacheHit -> do
       logDebug debug "Full cache hit (versions match)"
-      logDebug debug "  Using cached output"
-      -- TODO: Copy cached code to output directory if needed
+      -- Verify the output directory exists and contains at least one file
       let outputPath = optOutput (cfgOptions config)
-      pure $ Right $ CompiledPath outputPath
+      dirExists <- doesDirectoryExist outputPath
+      files <- if dirExists
+                 then listDirectory outputPath
+                 else pure []
+      if dirExists && not (null files)
+        then do
+          logDebug debug "  Using cached output"
+          pure $ Right $ CompiledPath outputPath
+        else do
+          logDebug debug "  Cache hit but output directory missing or empty — regenerating"
+          runFullPipeline config tools
 
     CacheMiss reason -> do
       logDebug debug $ "Cache miss: " <> T.pack (show reason)
@@ -55,10 +64,9 @@ runPipeline config tools = do
       runFullPipeline config tools
 
     PartialCacheHit valid invalid -> do
-      logDebug debug "Partial cache hit"
-      logDebug debug $ "  Valid plugins: " <> T.pack (show valid)
-      logDebug debug $ "  Invalid plugins: " <> T.pack (show invalid)
-      logDebug debug "  Regenerating invalid plugins..."
+      let totalPlugins = length valid + length invalid
+      logInfo $ T.pack (show (length invalid)) <> " of " <> T.pack (show totalPlugins)
+              <> " plugins changed — regenerating (partial regen not yet supported)"
       -- TODO: Implement partial regeneration
       -- For now, do full regeneration
       runFullPipeline config tools
@@ -147,7 +155,7 @@ runFullPipeline config tools = do
                   case testResult of
                     Left err -> pure $ Left err
                     Right () -> do
-                      writeCache config compiledPath
+                      writeCache config tools irPath compiledPath
 
                       -- Benchmarks
                       pipelineEnd <- getCurrentTime
@@ -170,25 +178,27 @@ diffUTCTime' :: UTCTime -> UTCTime -> Double
 diffUTCTime' t1 t0 = realToFrac (t1 `diffUTCTime` t0)
 
 -- | Write cache manifests after successful generation
-writeCache :: Config -> CompiledPath -> IO ()
-writeCache config _compiledPath = do
+writeCache :: Config -> ToolLocations -> IRPath -> CompiledPath -> IO ()
+writeCache config tools irPath _compiledPath = do
   let debug = optDebug (cfgOptions config)
       outputDir = optOutput (cfgOptions config)
+      synapseVer    = toolSynapseVersion tools
+      hubCodegenVer = toolHubCodegenVersion tools
   logDebug debug "Writing cache manifests..."
 
   -- Read file hashes from .codegen-metadata.json
   fileHashesMap <- readFileHashes outputDir debug
 
   -- Read IR to extract plugin hashes
-  irPluginCaches <- readIRPluginHashes outputDir debug
+  irPluginCaches <- readIRPluginHashes irPath debug
 
   -- Write IR cache manifest with plugin hashes
-  Cache.writeIRCacheManifest (cfgOptions config) (cfgBackend config) irPluginCaches
+  Cache.writeIRCacheManifest (cfgOptions config) (cfgBackend config) irPluginCaches synapseVer
 
   -- Write code cache with file hashes
   -- Convert flat file hash map to per-plugin structure
   let pluginCaches = buildPluginCaches fileHashesMap
-  Cache.writeCodeCacheManifest (cfgOptions config) (cfgBackend config) (cfgTarget config) pluginCaches
+  Cache.writeCodeCacheManifest (cfgOptions config) (cfgBackend config) (cfgTarget config) pluginCaches synapseVer hubCodegenVer
 
   logDebug debug "  Cache manifests written"
 
@@ -211,17 +221,16 @@ readFileHashes outputDir debug = do
           logDebug debug $ "  Read " <> T.pack (show (Map.size (ciFileHashes (cmCache metadata)))) <> " file hashes"
           pure $ ciFileHashes (cmCache metadata)
 
--- | Read IR plugin hashes from ir.json
-readIRPluginHashes :: FilePath -> Bool -> IO (Map.Map Text IRPluginCache)
-readIRPluginHashes outputDir debug = do
-  let irPath = outputDir </> "ir.json"
-  exists <- doesFileExist irPath
+-- | Read IR plugin hashes from ir.json (now at cache path)
+readIRPluginHashes :: IRPath -> Bool -> IO (Map.Map Text IRPluginCache)
+readIRPluginHashes (IRPath irFilePath) debug = do
+  exists <- doesFileExist irFilePath
   if not exists
     then do
       logDebug debug "  ir.json not found, skipping IR plugin hashes"
       pure Map.empty
     else do
-      result <- eitherDecodeFileStrict irPath
+      result <- eitherDecodeFileStrict irFilePath
       case result of
         Left err -> do
           logDebug debug $ "  Failed to parse IR: " <> T.pack err
@@ -277,10 +286,17 @@ generateIR config tools = do
       synapsePath = toolPathToFilePath (toolSynapse tools)
       Backend backendName = cfgBackend config
       outputDir = optOutput (cfgOptions config)
-      irFile = outputDir </> "ir.json"
+      opts = cfgOptions config
 
-  -- Ensure output directory exists
+  -- Compute IR file path in the cache directory:
+  --   <cacheDir>/synapse/ir/<backend>/ir.json
+  cacheDir <- getCacheDir opts
+  let irDir  = cacheDir </> "synapse" </> "ir" </> T.unpack backendName
+      irFile = irDir </> "ir.json"
+
+  -- Ensure output and IR cache directories exist
   createDirectoryIfMissing True outputDir
+  createDirectoryIfMissing True irDir
 
   -- Build synapse command: synapse -H <host> -P <port> -i <backend> --generator-info synapse-cc:version
   let host = cfgHost config
@@ -298,7 +314,7 @@ generateIR config tools = do
 
   case prExitCode result of
     ExitSuccess -> do
-      -- Write IR to file
+      -- Write IR to cache path
       BS.writeFile irFile (TE.encodeUtf8 $ prStdout result)
 
       -- Validate IR by trying to parse it

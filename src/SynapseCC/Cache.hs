@@ -121,12 +121,14 @@ readCodeCacheManifest opts backend target = do
 
 -- | Validate cache with version-aware checking
 -- Returns CacheResult indicating what needs regeneration
-validateCache :: Config -> IO CacheResult
-validateCache config = do
+validateCache :: Config -> ToolLocations -> IO CacheResult
+validateCache config tools = do
   let opts = cfgOptions config
       backend = cfgBackend config
       target = cfgTarget config
       debug = optDebug opts
+      synapseVer    = toolSynapseVersion tools
+      hubCodegenVer = toolHubCodegenVersion tools
 
   -- If --force flag is set, skip cache entirely
   if optForce opts
@@ -145,7 +147,7 @@ validateCache config = do
           -- Check tool versions against IR cache
           let irToolchain = ircmToolchain irManifest
           if tvSynapseCC irToolchain /= synapseCCVersion ||
-             tvSynapse irToolchain /= "0.2.0.0"  -- TODO: Get from synapse somehow
+             tvSynapse irToolchain /= synapseVer
             then do
               logDebug debug "Tool versions changed, invalidating IR cache"
               pure $ CacheMiss ToolVersionChanged
@@ -162,8 +164,8 @@ validateCache config = do
                   -- Check tool versions against code cache
                   let codeToolchain = ccmToolchain codeManifest
                   if tvSynapseCC codeToolchain /= synapseCCVersion ||
-                     tvSynapse codeToolchain /= "0.2.0.0" ||  -- TODO: Get from synapse
-                     isJust (tvHubCodegen codeToolchain) && tvHubCodegen codeToolchain /= Just "0.1.0"  -- TODO: Get from hub-codegen
+                     tvSynapse codeToolchain /= synapseVer ||
+                     isJust (tvHubCodegen codeToolchain) && tvHubCodegen codeToolchain /= Just hubCodegenVer
                     then do
                       logDebug debug "Tool versions changed, invalidating code cache"
                       pure $ CacheMiss ToolVersionChanged
@@ -316,8 +318,8 @@ analyzeHashChange pluginName irCache newCodeHash debug = do
 -- ============================================================================
 
 -- | Write IR cache manifest
-writeIRCacheManifest :: Options -> Backend -> Map Text IRPluginCache -> IO ()
-writeIRCacheManifest opts backend plugins = do
+writeIRCacheManifest :: Options -> Backend -> Map Text IRPluginCache -> Text -> IO ()
+writeIRCacheManifest opts backend plugins synapseVer = do
   cacheDir <- getIRCacheDir opts backend
   createDirectoryIfMissing True cacheDir
 
@@ -329,7 +331,7 @@ writeIRCacheManifest opts backend plugins = do
         , ircmIRVersion = "2.0"
         , ircmToolchain = ToolchainVersions
             { tvSynapseCC = synapseCCVersion
-            , tvSynapse = "0.2.0.0"  -- TODO: Get from synapse
+            , tvSynapse = synapseVer
             , tvHubCodegen = Nothing
             }
         , ircmUpdatedAt = timestamp
@@ -340,8 +342,8 @@ writeIRCacheManifest opts backend plugins = do
   BL.writeFile manifestPath (encode manifest)
 
 -- | Write code cache manifest
-writeCodeCacheManifest :: Options -> Backend -> Target -> Map Text CodePluginCache -> IO ()
-writeCodeCacheManifest opts backend target plugins = do
+writeCodeCacheManifest :: Options -> Backend -> Target -> Map Text CodePluginCache -> Text -> Text -> IO ()
+writeCodeCacheManifest opts backend target plugins synapseVer hubCodegenVer = do
   cacheDir <- getCodeCacheDir opts backend target
   createDirectoryIfMissing True cacheDir
 
@@ -356,8 +358,8 @@ writeCodeCacheManifest opts backend target plugins = do
             Rust -> "rust"
         , ccmToolchain = ToolchainVersions
             { tvSynapseCC = synapseCCVersion
-            , tvSynapse = "0.2.0.0"  -- TODO: Get from synapse
-            , tvHubCodegen = Just "0.1.0"  -- TODO: Get from hub-codegen
+            , tvSynapse = synapseVer
+            , tvHubCodegen = Just hubCodegenVer
             }
         , ccmUpdatedAt = timestamp
         , ccmPlugins = plugins

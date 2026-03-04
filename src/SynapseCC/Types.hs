@@ -38,6 +38,7 @@ module SynapseCC.Types
     -- * Errors
   , SynapseCCError(..)
   , formatError
+  , summarizeStderr
   ) where
 
 import Data.Aeson (FromJSON, ToJSON, fieldLabelModifier)
@@ -118,8 +119,10 @@ defaultOptions = Options
 
 -- | Discovered locations of required tools
 data ToolLocations = ToolLocations
-  { toolSynapse    :: !ToolPath
-  , toolHubCodegen :: !ToolPath
+  { toolSynapse            :: !ToolPath
+  , toolHubCodegen         :: !ToolPath
+  , toolSynapseVersion     :: !Text   -- ^ Result of @synapse --version@
+  , toolHubCodegenVersion  :: !Text   -- ^ Result of @hub-codegen --version@
   } deriving stock (Show, Eq)
 
 -- | Path to a discovered tool
@@ -285,6 +288,37 @@ data SynapseCCError
     -- ^ Invalid configuration
   deriving stock (Show, Eq)
 
+-- | Extract the first meaningful non-empty line from stderr output.
+-- Filters out Node.js stack frames and internal paths.
+-- Falls back to the first non-empty line if nothing more useful is found.
+-- Trims to 120 chars if very long.
+summarizeStderr :: Text -> Text
+summarizeStderr stderr =
+  let ls = T.lines stderr
+      isUseful l =
+        not (T.null (T.strip l)) &&
+        not ("    at " `T.isPrefixOf` l) &&
+        not ("at " `T.isPrefixOf` T.strip l) &&
+        not ("node:internal" `T.isInfixOf` l) &&
+        not ("node_modules" `T.isInfixOf` l)
+      firstUseful = case filter isUseful ls of
+        (x:_) -> T.take 120 (T.strip x)
+        []    -> case filter (not . T.null . T.strip) ls of
+          (x:_) -> T.take 120 (T.strip x)
+          []    -> "(no output)"
+  in firstUseful
+
+-- | Extract the key part of an aeson parse error, stripping the path prefix.
+-- E.g. "Error in $['irPlugins']: key \"foo\" not found"
+--   -> "key \"foo\" not found"
+summarizeAesonError :: Text -> Text
+summarizeAesonError msg =
+  -- aeson errors look like "Error in $...path...: actual message"
+  let afterColon = case T.breakOn ": " msg of
+        (_, rest) | not (T.null rest) -> T.drop 2 rest
+        _                             -> msg
+  in T.take 120 afterColon
+
 -- | Format error for display to user
 formatError :: SynapseCCError -> Text
 formatError = \case
@@ -320,8 +354,9 @@ formatError = \case
     T.unlines
       [ "[!] Error: " <> tool <> " failed (exit code " <> T.pack (show exitCode) <> ")"
       , ""
-      , "Output:"
-      , stderr
+      , "  " <> summarizeStderr stderr
+      , ""
+      , "  Run with --debug for full output."
       ]
 
   CacheError msg ->
@@ -329,9 +364,14 @@ formatError = \case
 
   InvalidIR msg ->
     T.unlines
-      [ "[!] Error: Invalid IR"
+      [ "[!] Failed to parse IR output from synapse"
       , ""
-      , msg
+      , "  The IR JSON was not in the expected format."
+      , "  This usually means synapse and synapse-cc are out of sync."
+      , ""
+      , "  Detail: " <> summarizeAesonError msg
+      , ""
+      , "  Try: rebuild synapse from source, or check synapse --version"
       ]
 
   BackendUnreachable url msg ->

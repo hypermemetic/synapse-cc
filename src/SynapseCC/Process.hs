@@ -46,7 +46,7 @@ runProcess exe args mbCwd debug = do
   when debug $ do
     unless (T.null stdout) $ do
       let len = T.length stdout
-      if len > 1000
+      if len > 5000
         then logDebug debug $ "  Stdout: <large output, " <> T.pack (show len) <> " chars, truncated>"
         else do
           logDebug debug "  Stdout:"
@@ -77,7 +77,7 @@ runProcessWithInput exe args mbCwd input debug = do
   when debug $ do
     unless (T.null stdout) $ do
       let len = T.length stdout
-      if len > 1000
+      if len > 5000
         then logDebug debug $ "  Stdout: <large output, " <> T.pack (show len) <> " chars, truncated>"
         else do
           logDebug debug "  Stdout:"
