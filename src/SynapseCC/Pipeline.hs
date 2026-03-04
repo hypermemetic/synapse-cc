@@ -368,7 +368,6 @@ generateCode config tools irPath = do
       args =
         [ "--target", targetArg
         , "--output", outputDir
-        , "--merge-strategy", "force"
         , unIRPath irPath
         ]
 
