@@ -32,6 +32,7 @@ import Data.Time.Format (formatTime, defaultTimeLocale)
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeDirectoryRecursive, getHomeDirectory)
 import System.FilePath ((</>))
 
+import SynapseCC.Logging (logDebug)
 import SynapseCC.Types
 import qualified SynapseCC.Dependency as Dep
 
@@ -130,14 +131,14 @@ validateCache config = do
   -- If --force flag is set, skip cache entirely
   if optForce opts
     then do
-      when debug $ putStrLn "[!] --force flag set, skipping cache"
+      logDebug debug "--force flag set, skipping cache"
       pure $ CacheMiss ManifestNotFound
     else do
       -- Try to read IR cache manifest
       irManifestResult <- readIRCacheManifest opts backend
       case irManifestResult of
         Left err -> do
-          when debug $ putStrLn $ "[!] IR cache miss: " ++ T.unpack (formatError err)
+          logDebug debug $ "IR cache miss: " <> formatError err
           pure $ CacheMiss ManifestNotFound
 
         Right irManifest -> do
@@ -146,14 +147,14 @@ validateCache config = do
           if tvSynapseCC irToolchain /= synapseCCVersion ||
              tvSynapse irToolchain /= "0.2.0.0"  -- TODO: Get from synapse somehow
             then do
-              when debug $ putStrLn "[!] Tool versions changed, invalidating IR cache"
+              logDebug debug "Tool versions changed, invalidating IR cache"
               pure $ CacheMiss ToolVersionChanged
             else do
               -- IR cache valid, check code cache
               codeManifestResult <- readCodeCacheManifest opts backend target
               case codeManifestResult of
                 Left err -> do
-                  when debug $ putStrLn $ "[!] Code cache miss: " ++ T.unpack (formatError err)
+                  logDebug debug $ "Code cache miss: " <> formatError err
                   -- IR is cached, but code is not
                   pure $ CacheMiss ManifestNotFound
 
@@ -164,11 +165,11 @@ validateCache config = do
                      tvSynapse codeToolchain /= "0.2.0.0" ||  -- TODO: Get from synapse
                      isJust (tvHubCodegen codeToolchain) && tvHubCodegen codeToolchain /= Just "0.1.0"  -- TODO: Get from hub-codegen
                     then do
-                      when debug $ putStrLn "[!] Tool versions changed, invalidating code cache"
+                      logDebug debug "Tool versions changed, invalidating code cache"
                       pure $ CacheMiss ToolVersionChanged
                     else do
                       -- V2: Check plugin hashes for granular invalidation
-                      when debug $ putStrLn "[*] Checking plugin hashes for granular invalidation..."
+                      logDebug debug "Checking plugin hashes for granular invalidation..."
                       validatePluginCaches irManifest codeManifest debug
 
 -- ============================================================================
@@ -201,21 +202,21 @@ validatePluginCaches irManifest codeManifest debug = do
   when debug $ do
     let transitivelyInvalid = Set.difference allInvalidPlugins directlyInvalidPlugins
     when (not $ Set.null transitivelyInvalid) $ do
-      putStrLn "[!] Transitive invalidation due to dependencies:"
+      logDebug debug "Transitive invalidation due to dependencies:"
       forM_ (Set.toList transitivelyInvalid) $ \name ->
-        putStrLn $ "    - " ++ T.unpack name ++ " (depends on invalid plugin)"
+        logDebug debug $ "    - " <> name <> " (depends on invalid plugin)"
 
   if null invalidPluginsList
     then do
-      when debug $ putStrLn $ "[+] Full cache hit - all " ++ show (length validPluginsList) ++ " plugins valid"
+      logDebug debug $ "Full cache hit - all " <> T.pack (show (length validPluginsList)) <> " plugins valid"
       pure FullCacheHit
     else do
       when debug $ do
-        putStrLn $ "[!] Partial cache hit:"
-        putStrLn $ "    Valid: " ++ show (length validPluginsList) ++ " plugins"
-        putStrLn $ "    Invalid: " ++ show (length invalidPluginsList) ++ " plugins (including transitive)"
+        logDebug debug "Partial cache hit:"
+        logDebug debug $ "    Valid: " <> T.pack (show (length validPluginsList)) <> " plugins"
+        logDebug debug $ "    Invalid: " <> T.pack (show (length invalidPluginsList)) <> " plugins (including transitive)"
         forM_ invalidPluginsList $ \name ->
-          putStrLn $ "      - " ++ T.unpack name
+          logDebug debug $ "      - " <> name
       pure $ PartialCacheHit validPluginsList invalidPluginsList
 
 -- | Validate a single plugin's cache
@@ -228,17 +229,17 @@ validatePluginCache irManifest codeManifest debug pluginName = do
   case (Map.lookup pluginName irPlugins, Map.lookup pluginName codePlugins) of
     (Nothing, Nothing) -> do
       -- Plugin not in either cache - invalid
-      when debug $ putStrLn $ "[!] Plugin '" ++ T.unpack pluginName ++ "' not found in cache"
+      logDebug debug $ "Plugin '" <> pluginName <> "' not found in cache"
       pure (pluginName, False)
 
     (Just _irCache, Nothing) -> do
       -- IR cached but code not generated - invalid
-      when debug $ putStrLn $ "[!] Plugin '" ++ T.unpack pluginName ++ "' has IR cache but no code cache"
+      logDebug debug $ "Plugin '" <> pluginName <> "' has IR cache but no code cache"
       pure (pluginName, False)
 
     (Nothing, Just _codeCache) -> do
       -- Code exists but no IR cache - invalid (shouldn't happen)
-      when debug $ putStrLn $ "[!] Plugin '" ++ T.unpack pluginName ++ "' has code cache but no IR cache"
+      logDebug debug $ "Plugin '" <> pluginName <> "' has code cache but no IR cache"
       pure (pluginName, False)
 
     (Just irCache, Just codeCache) -> do
@@ -272,19 +273,17 @@ validatePluginV2 irCache codeCache pluginName debug = do
 -- | Report cache hit with V2 hash details
 reportCacheHit :: Text -> Text -> Text -> Bool -> IO ()
 reportCacheHit pluginName selfHash childrenHash debug = do
-  when debug $ do
-    putStrLn $ "[+] Cache hit: '" ++ T.unpack pluginName ++ "'"
-    when (not $ T.null selfHash) $
-      putStrLn $ "    self_hash:     " ++ T.unpack (T.take 8 selfHash) ++ "..."
-    when (not $ T.null childrenHash) $
-      putStrLn $ "    children_hash: " ++ T.unpack (T.take 8 childrenHash) ++ "..."
+  logDebug debug $ "Cache hit: '" <> pluginName <> "'"
+  when (not $ T.null selfHash) $
+    logDebug debug $ "    self_hash:     " <> T.take 8 selfHash <> "..."
+  when (not $ T.null childrenHash) $
+    logDebug debug $ "    children_hash: " <> T.take 8 childrenHash <> "..."
 
 -- | Report cache invalidation with detailed reason
 reportInvalidation :: Text -> String -> Bool -> IO ()
 reportInvalidation pluginName reason debug = do
-  when debug $ do
-    putStrLn $ "[!] Cache miss: '" ++ T.unpack pluginName ++ "'"
-    putStrLn $ "    Reason: " ++ reason
+  logDebug debug $ "Cache miss: '" <> pluginName <> "'"
+  logDebug debug $ "    Reason: " <> T.pack reason
 
 -- | Analyze what changed using V2 granular hashes
 analyzeHashChange :: Text -> IRPluginCache -> Text -> Bool -> IO ()
@@ -293,25 +292,24 @@ analyzeHashChange pluginName irCache newCodeHash debug = do
       cachedSelfHash = ipcSelfHash irCache
       cachedChildrenHash = ipcChildrenHash irCache
 
-  when debug $ do
-    putStrLn $ "[!] Cache miss: '" ++ T.unpack pluginName ++ "'"
-    putStrLn $ "    IR hash changed:"
-    putStrLn $ "      cached: " ++ T.unpack (T.take 8 cachedIRHash) ++ "..."
-    putStrLn $ "      new:    " ++ T.unpack (T.take 8 newCodeHash) ++ "..."
+  logDebug debug $ "Cache miss: '" <> pluginName <> "'"
+  logDebug debug "    IR hash changed:"
+  logDebug debug $ "      cached: " <> T.take 8 cachedIRHash <> "..."
+  logDebug debug $ "      new:    " <> T.take 8 newCodeHash <> "..."
 
-    -- V2 granular analysis (when fresh hashes are available)
-    if T.null cachedSelfHash && T.null cachedChildrenHash
-      then do
-        putStrLn "    V2 hashes unavailable - using V1 validation"
-        putStrLn "    Reason: Schema or IR changed (full regeneration needed)"
-      else do
-        putStrLn "    V2 granular analysis:"
-        when (not $ T.null cachedSelfHash) $
-          putStrLn $ "      self_hash:     " ++ T.unpack (T.take 8 cachedSelfHash) ++ "... (methods)"
-        when (not $ T.null cachedChildrenHash) $
-          putStrLn $ "      children_hash: " ++ T.unpack (T.take 8 cachedChildrenHash) ++ "... (dependencies)"
-        putStrLn "    Note: Fresh schema comparison needed for granular invalidation"
-        putStrLn "          (requires fetching current schema from backend)"
+  -- V2 granular analysis (when fresh hashes are available)
+  if T.null cachedSelfHash && T.null cachedChildrenHash
+    then do
+      logDebug debug "    V2 hashes unavailable - using V1 validation"
+      logDebug debug "    Reason: Schema or IR changed (full regeneration needed)"
+    else do
+      logDebug debug "    V2 granular analysis:"
+      when (not $ T.null cachedSelfHash) $
+        logDebug debug $ "      self_hash:     " <> T.take 8 cachedSelfHash <> "... (methods)"
+      when (not $ T.null cachedChildrenHash) $
+        logDebug debug $ "      children_hash: " <> T.take 8 cachedChildrenHash <> "... (dependencies)"
+      logDebug debug "    Note: Fresh schema comparison needed for granular invalidation"
+      logDebug debug "          (requires fetching current schema from backend)"
 
 -- ============================================================================
 -- Cache Writing
@@ -380,4 +378,4 @@ clearCache opts = do
   when exists $ do
     catch
       (removeDirectoryRecursive cacheDir)
-      (\(e :: SomeException) -> putStrLn $ "Warning: Failed to clear cache: " ++ show e)
+      (\(e :: SomeException) -> logDebug True $ "Warning: Failed to clear cache: " <> T.pack (show e))
