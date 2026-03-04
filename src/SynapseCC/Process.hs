@@ -5,15 +5,17 @@ module SynapseCC.Process
   , ProcessResult(..)
   ) where
 
+import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TE
-import qualified Data.Text.IO as TIO
 import System.Exit (ExitCode(..))
 import System.IO (Handle, hClose, hGetContents, hPutStr)
 import System.Process hiding (runProcess)
+
+import SynapseCC.Logging (logDebug)
 
 -- ============================================================================
 -- Process Execution
@@ -34,11 +36,10 @@ runProcess
   -> Bool          -- ^ Debug mode
   -> IO ProcessResult
 runProcess exe args mbCwd debug = do
-  when debug $ do
-    putStrLn $ "Running: " ++ exe ++ " " ++ unwords args
-    case mbCwd of
-      Just cwd -> putStrLn $ "  Working directory: " ++ cwd
-      Nothing -> pure ()
+  logDebug debug $ "Running: " <> T.pack exe <> " " <> T.pack (unwords args)
+  case mbCwd of
+    Just cwd -> logDebug debug $ "  Working directory: " <> T.pack cwd
+    Nothing  -> pure ()
 
   (exitCode, stdout, stderr) <- readProcessWithExitCode' exe args mbCwd ""
 
@@ -46,13 +47,13 @@ runProcess exe args mbCwd debug = do
     unless (T.null stdout) $ do
       let len = T.length stdout
       if len > 1000
-        then putStrLn $ "  Stdout: <large output, " ++ show len ++ " chars, truncated>"
+        then logDebug debug $ "  Stdout: <large output, " <> T.pack (show len) <> " chars, truncated>"
         else do
-          putStrLn "  Stdout:"
-          putStrLn $ "    " ++ T.unpack stdout
+          logDebug debug "  Stdout:"
+          logDebug debug $ "    " <> stdout
     unless (T.null stderr) $ do
-      putStrLn "  Stderr:"
-      putStrLn $ "    " ++ T.unpack stderr
+      logDebug debug "  Stderr:"
+      logDebug debug $ "    " <> stderr
 
   pure $ ProcessResult exitCode stdout stderr
 
@@ -65,12 +66,11 @@ runProcessWithInput
   -> Bool          -- ^ Debug mode
   -> IO ProcessResult
 runProcessWithInput exe args mbCwd input debug = do
-  when debug $ do
-    putStrLn $ "Running: " ++ exe ++ " " ++ unwords args
-    case mbCwd of
-      Just cwd -> putStrLn $ "  Working directory: " ++ cwd
-      Nothing -> pure ()
-    putStrLn $ "  With input: " ++ T.unpack (T.take 100 input) ++ "..."
+  logDebug debug $ "Running: " <> T.pack exe <> " " <> T.pack (unwords args)
+  case mbCwd of
+    Just cwd -> logDebug debug $ "  Working directory: " <> T.pack cwd
+    Nothing  -> pure ()
+  logDebug debug $ "  With input: " <> T.take 100 input <> "..."
 
   (exitCode, stdout, stderr) <- readProcessWithExitCode' exe args mbCwd (T.unpack input)
 
@@ -78,13 +78,13 @@ runProcessWithInput exe args mbCwd input debug = do
     unless (T.null stdout) $ do
       let len = T.length stdout
       if len > 1000
-        then putStrLn $ "  Stdout: <large output, " ++ show len ++ " chars, truncated>"
+        then logDebug debug $ "  Stdout: <large output, " <> T.pack (show len) <> " chars, truncated>"
         else do
-          putStrLn "  Stdout:"
-          putStrLn $ "    " ++ T.unpack stdout
+          logDebug debug "  Stdout:"
+          logDebug debug $ "    " <> stdout
     unless (T.null stderr) $ do
-      putStrLn "  Stderr:"
-      putStrLn $ "    " ++ T.unpack stderr
+      logDebug debug "  Stderr:"
+      logDebug debug $ "    " <> stderr
 
   pure $ ProcessResult exitCode stdout stderr
 
@@ -124,11 +124,3 @@ readProcessWithExitCode' exe args mbCwd input = do
   exitCode <- waitForProcess ph
 
   pure (exitCode, stdoutText, stderrText)
-
-when :: Applicative f => Bool -> f () -> f ()
-when True action = action
-when False _ = pure ()
-
-unless :: Applicative f => Bool -> f () -> f ()
-unless False action = action
-unless True _ = pure ()

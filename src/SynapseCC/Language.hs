@@ -29,13 +29,30 @@ data PackageManager
   | Bun
   deriving (Show, Eq)
 
--- | Get command name for package manager
+-- | Get install command name for package manager
 packageManagerCommand :: PackageManager -> String
 packageManagerCommand = \case
   Npm  -> "npm"
   Pnpm -> "pnpm"
   Yarn -> "yarn"
   Bun  -> "bun"
+
+-- | Get (command, args-prefix) for running an exec via the package manager
+-- e.g. bun x tsc, pnpm exec tsc, npx tsc
+packageManagerExec :: PackageManager -> (String, [String])
+packageManagerExec = \case
+  Bun  -> ("bun", ["x"])
+  Pnpm -> ("pnpm", ["exec"])
+  Yarn -> ("yarn", [])
+  Npm  -> ("npx", [])
+
+-- | Get (command, args) for running tests via the package manager
+packageManagerTestCmd :: PackageManager -> (String, [String])
+packageManagerTestCmd = \case
+  Bun  -> ("bun", ["test"])
+  Pnpm -> ("pnpm", ["test"])
+  Yarn -> ("yarn", ["test"])
+  Npm  -> ("npm", ["test"])
 
 -- | Detect which package manager to use for TypeScript project
 detectPackageManager :: GeneratedPath -> Bool -> IO PackageManager
@@ -74,8 +91,8 @@ detectPackageManager (GeneratedPath path) debug = do
                       when debug $ putStrLn "  [+] bun available, using bun"
                       pure Bun
                     else do
-                      when debug $ putStrLn "  [+] Defaulting to npm"
-                      pure Npm
+                      when debug $ putStrLn "  [+] Defaulting to bun"
+                      pure Bun
 
 -- | Check if package.json contains workspace protocol
 checkForWorkspaceProtocol :: GeneratedPath -> IO Bool
@@ -168,8 +185,11 @@ buildProject :: Target -> GeneratedPath -> Bool -> IO (Either SynapseCCError Com
 buildProject TypeScript genPath debug = do
   when debug $ putStrLn $ "[*] Type-checking TypeScript in " ++ unGeneratedPath genPath
 
-  -- Run tsc --noEmit for type-checking
-  result <- runProcess "npx" ["tsc", "--noEmit"] (Just $ unGeneratedPath genPath) debug
+  pm <- detectPackageManager genPath debug
+  let (cmd, prefix) = packageManagerExec pm
+      args = prefix ++ ["tsc", "--noEmit"]
+
+  result <- runProcess cmd args (Just $ unGeneratedPath genPath) debug
 
   case prExitCode result of
     ExitSuccess -> do
@@ -197,18 +217,20 @@ runTests target genPath debug = case target of
   Python -> pure $ Right ()  -- TODO: Implement Python tests
   Rust -> pure $ Right ()  -- TODO: Implement Rust tests
 
--- | Run TypeScript smoke tests using npm
+-- | Run TypeScript smoke tests
 runTypeScriptTests :: GeneratedPath -> Bool -> IO (Either SynapseCCError ())
-runTypeScriptTests (GeneratedPath path) debug = do
-  when debug $ putStrLn $ "[*] Running smoke tests in " ++ path
+runTypeScriptTests genPath debug = do
+  when debug $ putStrLn $ "[*] Running smoke tests in " ++ unGeneratedPath genPath
 
-  -- Check if npm is available
-  result <- runProcess "npm" ["test"] (Just path) debug
+  pm <- detectPackageManager genPath debug
+  let (cmd, args) = packageManagerTestCmd pm
+      toolLabel = T.pack cmd <> " test"
+
+  result <- runProcess cmd args (Just $ unGeneratedPath genPath) debug
 
   case prExitCode result of
     ExitSuccess -> do
       when debug $ putStrLn "  [+] Tests passed"
       pure $ Right ()
     ExitFailure code -> do
-      let stderr = prStderr result
-      pure $ Left $ LanguageToolError "npm test" stderr code
+      pure $ Left $ LanguageToolError toolLabel (prStderr result) code

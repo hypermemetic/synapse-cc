@@ -7,7 +7,6 @@ module SynapseCC.CLI
 import Data.Text (Text)
 import qualified Data.Text as T
 import Options.Applicative
-import System.FilePath ((</>))
 
 import SynapseCC.Types
 
@@ -19,7 +18,7 @@ import SynapseCC.Types
 parseArgs :: IO Config
 parseArgs = execParser opts
   where
-    opts = info (configParser <**> helper)
+    opts = info (configParser <**> helper <**> simpleVersioner (T.unpack versionInfo))
       ( fullDesc
      <> progDesc "Unified compiler toolchain for Plexus backends"
      <> header "synapse-cc - from schema to compiled client in one command"
@@ -90,13 +89,10 @@ optionsParser = Options
      <> showDefault
      <> help "Output directory"
       )
-  <*> option auto
-      ( long "bundle-transport"
-     <> metavar "BOOL"
-     <> value (optBundleTransport defaultOptions)
-     <> showDefault
-     <> help "Bundle transport code (true/false)"
-      )
+  <*> fmap not (switch
+      ( long "no-bundle-transport"
+     <> help "Don't bundle transport code into generated output"
+      ))
   <*> flag True False
       ( long "no-install"
      <> help "Skip dependency installation"
@@ -121,13 +117,19 @@ optionsParser = Options
      <> help "Force regeneration (ignore cache)"
       )
   <*> switch
-      ( long "watch"
-     <> help "Watch backend and regenerate on changes"
-      )
-  <*> switch
       ( long "debug"
      <> help "Enable debug logging"
       )
+  <*> optional (option str
+      ( long "synapse"
+     <> metavar "PATH"
+     <> help "Path to synapse binary (overrides discovery)"
+      ))
+  <*> optional (option str
+      ( long "hub-codegen"
+     <> metavar "PATH"
+     <> help "Path to hub-codegen binary (overrides discovery)"
+      ))
 
 -- ============================================================================
 -- Version Info
