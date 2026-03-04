@@ -128,7 +128,8 @@ getToolVersion exe = do
           stripped  = case T.unpack (T.strip (T.pack firstLine)) of
             ('v':rest) -> rest
             other      -> other
-      in pure $ T.strip $ T.pack stripped
+          ver = T.strip $ T.pack stripped
+      in pure $ if T.null ver then "unknown" else ver
 
 -- ============================================================================
 -- dist-newstyle Glob Search

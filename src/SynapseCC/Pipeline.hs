@@ -359,7 +359,6 @@ generateCode config tools irPath = do
       hubCodegenPath = toolPathToFilePath (toolHubCodegen tools)
       outputDir = optOutput (cfgOptions config)
       target = cfgTarget config
-
   -- Build hub-codegen command
   let targetArg = case target of
         TypeScript -> "typescript"
@@ -369,6 +368,7 @@ generateCode config tools irPath = do
       args =
         [ "--target", targetArg
         , "--output", outputDir
+        , "--merge-strategy", "force"
         , unIRPath irPath
         ]
 
