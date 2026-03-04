@@ -1,6 +1,6 @@
 module Main where
 
-import Data.Text (Text)
+import Control.Monad (when)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Exit (exitFailure, exitSuccess)
@@ -32,7 +32,7 @@ main = do
 
   -- Discover tools
   logStep "Discovering tools..."
-  toolsResult <- discoverTools debug
+  toolsResult <- discoverTools (cfgOptions config)
   case toolsResult of
     Left err -> do
       TIO.putStrLn $ formatError err
@@ -56,10 +56,3 @@ main = do
           logSuccess $ "Client ready at " <> T.pack outputPath
           exitSuccess
 
--- ============================================================================
--- Helpers
--- ============================================================================
-
-when :: Applicative f => Bool -> f () -> f ()
-when True action = action
-when False _ = pure ()

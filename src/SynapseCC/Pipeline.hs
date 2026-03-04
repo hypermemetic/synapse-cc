@@ -5,21 +5,20 @@ module SynapseCC.Pipeline
   , generateCode
   ) where
 
-import Control.Monad (unless, when)
 import Data.Aeson (FromJSON, eitherDecodeStrict, eitherDecodeFileStrict)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
-import Data.Monoid (mempty)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import GHC.Generics (Generic)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Exit (ExitCode(..))
-import System.FilePath ((</>), takeDirectory)
+import System.FilePath ((</>))
 
+import SynapseCC.Logging (logDebug, logStep, logSuccess)
 import SynapseCC.Types
 import SynapseCC.Process
 import SynapseCC.Discover
@@ -39,22 +38,22 @@ runPipeline config tools = do
   cacheResult <- Cache.validateCache config
   case cacheResult of
     FullCacheHit -> do
-      when debug $ putStrLn "\n[+] Full cache hit (versions match)"
-      when debug $ putStrLn "  [*] Using cached output"
+      logDebug debug "Full cache hit (versions match)"
+      logDebug debug "  Using cached output"
       -- TODO: Copy cached code to output directory if needed
       let outputPath = optOutput (cfgOptions config)
       pure $ Right $ CompiledPath outputPath
 
     CacheMiss reason -> do
-      when debug $ putStrLn $ "\n[!] Cache miss: " ++ show reason
-      when debug $ putStrLn "  [*] Regenerating..."
+      logDebug debug $ "Cache miss: " <> T.pack (show reason)
+      logDebug debug "  Regenerating..."
       runFullPipeline config tools
 
     PartialCacheHit valid invalid -> do
-      when debug $ putStrLn "\n[*] Partial cache hit"
-      when debug $ putStrLn $ "  [+] Valid plugins: " ++ show valid
-      when debug $ putStrLn $ "  [!] Invalid plugins: " ++ show invalid
-      when debug $ putStrLn "  [*] Regenerating invalid plugins..."
+      logDebug debug "Partial cache hit"
+      logDebug debug $ "  Valid plugins: " <> T.pack (show valid)
+      logDebug debug $ "  Invalid plugins: " <> T.pack (show invalid)
+      logDebug debug "  Regenerating invalid plugins..."
       -- TODO: Implement partial regeneration
       -- For now, do full regeneration
       runFullPipeline config tools
@@ -65,28 +64,39 @@ runFullPipeline config tools = do
   let debug = optDebug (cfgOptions config)
 
   -- Step 1: Generate IR
-  when debug $ putStrLn "\n[*] Generating IR..."
+  logStep "Generating IR..."
   irResult <- generateIR config tools
   case irResult of
     Left err -> pure $ Left err
     Right irPath -> do
-      when debug $ putStrLn $ "  [+] IR generated at " ++ unIRPath irPath
+      -- Count plugins for progress message
+      irBytes <- BS.readFile (unIRPath irPath)
+      let pluginCount = case eitherDecodeStrict irBytes of
+            Right (ir :: IRData) -> Map.size (irdPlugins ir)
+            Left _               -> 0
+      logSuccess $ "IR generated (" <> T.pack (show pluginCount) <> " plugins)"
+      logDebug debug $ "  IR at " <> T.pack (unIRPath irPath)
 
       -- Step 2: Generate code
-      when debug $ putStrLn "\n[*] Generating code..."
+      logStep "Generating code..."
       codeResult <- generateCode config tools irPath
       case codeResult of
         Left err -> pure $ Left err
         Right genPath -> do
-          when debug $ putStrLn $ "  [+] Code generated at " ++ unGeneratedPath genPath
+          logSuccess "Code generated"
+          logDebug debug $ "  Code at " <> T.pack (unGeneratedPath genPath)
 
           -- Step 3: Install dependencies (if enabled)
           installResult <- if optInstallDeps (cfgOptions config)
             then do
-              when debug $ putStrLn "\n[*] Installing dependencies..."
-              Language.installDependencies (cfgTarget config) genPath debug
+              logStep "Installing dependencies..."
+              result <- Language.installDependencies (cfgTarget config) genPath debug
+              case result of
+                Right () -> logSuccess "Dependencies installed"
+                Left _   -> pure ()
+              pure result
             else do
-              when debug $ putStrLn "\n[*] Skipping dependency installation (--no-install)"
+              logDebug debug "Skipping dependency installation (--no-install)"
               pure $ Right ()
 
           case installResult of
@@ -96,10 +106,14 @@ runFullPipeline config tools = do
               -- Step 4: Build project (if enabled)
               buildResult <- if optBuild (cfgOptions config)
                 then do
-                  when debug $ putStrLn "\n[*] Building project..."
-                  Language.buildProject (cfgTarget config) genPath debug
+                  logStep "Building..."
+                  result <- Language.buildProject (cfgTarget config) genPath debug
+                  case result of
+                    Right _ -> logSuccess "Build passed"
+                    Left _  -> pure ()
+                  pure result
                 else do
-                  when debug $ putStrLn "\n[*] Skipping build (--no-build)"
+                  logDebug debug "Skipping build (--no-build)"
                   pure $ Right $ CompiledPath $ unGeneratedPath genPath
 
               case buildResult of
@@ -109,12 +123,12 @@ runFullPipeline config tools = do
                   -- Step 5: Run tests (if enabled)
                   if optRunTests (cfgOptions config)
                     then do
-                      when debug $ putStrLn "\n[*] Running smoke tests..."
+                      logStep "Running tests..."
                       testResult <- Language.runTests (cfgTarget config) genPath debug
                       case testResult of
                         Left err -> pure $ Left err
                         Right () -> do
-                          when debug $ putStrLn "  [+] All tests passed"
+                          logSuccess "Tests passed"
                           writeCache config compiledPath
                           pure $ Right compiledPath
                     else do
@@ -126,7 +140,7 @@ writeCache :: Config -> CompiledPath -> IO ()
 writeCache config _compiledPath = do
   let debug = optDebug (cfgOptions config)
       outputDir = optOutput (cfgOptions config)
-  when debug $ putStrLn "\n[*] Writing cache manifests..."
+  logDebug debug "Writing cache manifests..."
 
   -- Read file hashes from .codegen-metadata.json
   fileHashesMap <- readFileHashes outputDir debug
@@ -142,7 +156,7 @@ writeCache config _compiledPath = do
   let pluginCaches = buildPluginCaches fileHashesMap
   Cache.writeCodeCacheManifest (cfgOptions config) (cfgBackend config) (cfgTarget config) pluginCaches
 
-  when debug $ putStrLn "  [+] Cache manifests written"
+  logDebug debug "  Cache manifests written"
 
 -- | Read file hashes from .codegen-metadata.json
 readFileHashes :: FilePath -> Bool -> IO (Map.Map Text Text)
@@ -151,16 +165,16 @@ readFileHashes outputDir debug = do
   exists <- doesFileExist metadataPath
   if not exists
     then do
-      when debug $ putStrLn "  [!] .codegen-metadata.json not found, skipping file hashes"
+      logDebug debug "  .codegen-metadata.json not found, skipping file hashes"
       pure Map.empty
     else do
       result <- eitherDecodeFileStrict metadataPath
       case result of
         Left err -> do
-          when debug $ putStrLn $ "  [!] Failed to parse metadata: " ++ err
+          logDebug debug $ "  Failed to parse metadata: " <> T.pack err
           pure Map.empty
         Right (metadata :: CodegenMetadata) -> do
-          when debug $ putStrLn $ "  [+] Read " ++ show (Map.size (ciFileHashes (cmCache metadata))) ++ " file hashes"
+          logDebug debug $ "  Read " <> T.pack (show (Map.size (ciFileHashes (cmCache metadata)))) <> " file hashes"
           pure $ ciFileHashes (cmCache metadata)
 
 -- | Read IR plugin hashes from ir.json
@@ -170,18 +184,18 @@ readIRPluginHashes outputDir debug = do
   exists <- doesFileExist irPath
   if not exists
     then do
-      when debug $ putStrLn "  [!] ir.json not found, skipping IR plugin hashes"
+      logDebug debug "  ir.json not found, skipping IR plugin hashes"
       pure Map.empty
     else do
       result <- eitherDecodeFileStrict irPath
       case result of
         Left err -> do
-          when debug $ putStrLn $ "  [!] Failed to parse IR: " ++ err
+          logDebug debug $ "  Failed to parse IR: " <> T.pack err
           pure Map.empty
         Right (irData :: IRData) -> do
           let pluginHashes = fromMaybe Map.empty (irdPluginHashes irData)
               pluginCaches = Map.mapWithKey (buildIRPluginCache pluginHashes) (irdPlugins irData)
-          when debug $ putStrLn $ "  [+] Extracted hashes for " ++ show (Map.size pluginCaches) ++ " plugins"
+          logDebug debug $ "  Extracted hashes for " <> T.pack (show (Map.size pluginCaches)) <> " plugins"
           pure pluginCaches
 
 -- | Build an IRPluginCache entry from plugin info and hashes
@@ -295,7 +309,6 @@ generateCode config tools irPath = do
       hubCodegenPath = toolPathToFilePath (toolHubCodegen tools)
       outputDir = optOutput (cfgOptions config)
       target = cfgTarget config
-      opts = cfgOptions config
 
   -- Build hub-codegen command
   let targetArg = case target of
@@ -318,4 +331,3 @@ generateCode config tools irPath = do
 
     ExitFailure code -> do
       pure $ Left $ HubCodegenError (prStderr result) code
-

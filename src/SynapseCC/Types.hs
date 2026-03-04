@@ -92,8 +92,9 @@ data Options = Options
   , optRunTests        :: !Bool
   , optCacheDir        :: !FilePath
   , optForce           :: !Bool
-  , optWatch           :: !Bool
   , optDebug           :: !Bool
+  , optSynapsePath     :: !(Maybe FilePath)  -- ^ Override synapse binary path
+  , optHubCodegenPath  :: !(Maybe FilePath)  -- ^ Override hub-codegen binary path
   } deriving stock (Show, Eq, Generic)
 
 -- | Default options
@@ -106,8 +107,9 @@ defaultOptions = Options
   , optRunTests        = False
   , optCacheDir        = "~/.cache/plexus-codegen"
   , optForce           = False
-  , optWatch           = False
   , optDebug           = False
+  , optSynapsePath     = Nothing
+  , optHubCodegenPath  = Nothing
   }
 
 -- ============================================================================
