@@ -5,6 +5,7 @@ module SynapseCC.Pipeline
   , generateCode
   ) where
 
+import Control.Monad (when)
 import Data.Aeson (FromJSON, eitherDecodeStrict, eitherDecodeFileStrict)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
@@ -13,11 +14,14 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
+import Data.Time.Format (formatTime, defaultTimeLocale)
 import GHC.Generics (Generic)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 
+import SynapseCC.Benchmark (timeStep, loadBaseline, saveBaseline, baselinePath, reportBenchmarks)
 import SynapseCC.Logging (logDebug, logStep, logSuccess)
 import SynapseCC.Types
 import SynapseCC.Process
@@ -61,15 +65,19 @@ runPipeline config tools = do
 -- | Run the full pipeline without cache
 runFullPipeline :: Config -> ToolLocations -> IO (Either SynapseCCError CompiledPath)
 runFullPipeline config tools = do
-  let debug = optDebug (cfgOptions config)
+  let debug  = optDebug (cfgOptions config)
+      opts   = cfgOptions config
+      Backend backendName = cfgBackend config
+      targetName = T.pack $ show (cfgTarget config)
+
+  pipelineStart <- getCurrentTime
 
   -- Step 1: Generate IR
   logStep "Generating IR..."
-  irResult <- generateIR config tools
+  (irResult, irMs) <- timeStep $ generateIR config tools
   case irResult of
     Left err -> pure $ Left err
     Right irPath -> do
-      -- Count plugins for progress message
       irBytes <- BS.readFile (unIRPath irPath)
       let pluginCount = case eitherDecodeStrict irBytes of
             Right (ir :: IRData) -> Map.size (irdPlugins ir)
@@ -79,7 +87,7 @@ runFullPipeline config tools = do
 
       -- Step 2: Generate code
       logStep "Generating code..."
-      codeResult <- generateCode config tools irPath
+      (codeResult, codeMs) <- timeStep $ generateCode config tools irPath
       case codeResult of
         Left err -> pure $ Left err
         Right genPath -> do
@@ -87,53 +95,74 @@ runFullPipeline config tools = do
           logDebug debug $ "  Code at " <> T.pack (unGeneratedPath genPath)
 
           -- Step 3: Install dependencies (if enabled)
-          installResult <- if optInstallDeps (cfgOptions config)
+          (installResult, installMs) <- if optInstallDeps opts
             then do
               logStep "Installing dependencies..."
-              result <- Language.installDependencies (cfgTarget config) genPath debug
+              (result, ms) <- timeStep $ Language.installDependencies (cfgTarget config) genPath debug
               case result of
                 Right () -> logSuccess "Dependencies installed"
                 Left _   -> pure ()
-              pure result
+              pure (result, ms)
             else do
               logDebug debug "Skipping dependency installation (--no-install)"
-              pure $ Right ()
+              pure (Right (), 0)
 
           case installResult of
             Left err -> pure $ Left err
             Right () -> do
 
               -- Step 4: Build project (if enabled)
-              buildResult <- if optBuild (cfgOptions config)
+              (buildResult, buildMs) <- if optBuild opts
                 then do
                   logStep "Building..."
-                  result <- Language.buildProject (cfgTarget config) genPath debug
+                  (result, ms) <- timeStep $ Language.buildProject (cfgTarget config) genPath debug
                   case result of
                     Right _ -> logSuccess "Build passed"
                     Left _  -> pure ()
-                  pure result
+                  pure (result, ms)
                 else do
                   logDebug debug "Skipping build (--no-build)"
-                  pure $ Right $ CompiledPath $ unGeneratedPath genPath
+                  pure (Right $ CompiledPath $ unGeneratedPath genPath, 0)
 
               case buildResult of
                 Left err -> pure $ Left err
                 Right compiledPath -> do
 
                   -- Step 5: Run tests (if enabled)
-                  if optRunTests (cfgOptions config)
+                  (testResult, testMs) <- if optRunTests opts
                     then do
                       logStep "Running tests..."
-                      testResult <- Language.runTests (cfgTarget config) genPath debug
-                      case testResult of
-                        Left err -> pure $ Left err
-                        Right () -> do
-                          logSuccess "Tests passed"
-                          writeCache config compiledPath
-                          pure $ Right compiledPath
-                    else do
+                      (result, ms) <- timeStep $ Language.runTests (cfgTarget config) genPath debug
+                      case result of
+                        Right () -> logSuccess "Tests passed"
+                        Left _   -> pure ()
+                      pure (result, ms)
+                    else pure (Right (), 0)
+
+                  case testResult of
+                    Left err -> pure $ Left err
+                    Right () -> do
                       writeCache config compiledPath
+
+                      -- Benchmarks
+                      pipelineEnd <- getCurrentTime
+                      let totalMs  = round (pipelineEnd `diffUTCTime'` pipelineStart * 1000) :: Int
+                          steps    = Map.fromList $ filter (\(_, v) -> v > 0)
+                                       [ ("ir_generation",       irMs)
+                                       , ("code_generation",     codeMs)
+                                       , ("install_dependencies", installMs)
+                                       , ("build",               buildMs)
+                                       , ("tests",               testMs)
+                                       ]
+                          ts       = T.pack $ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" pipelineEnd
+                          bPath    = baselinePath (optCacheDir opts) targetName backendName
+
+                      reportBenchmarks bPath backendName targetName ts steps totalMs
+
                       pure $ Right compiledPath
+
+diffUTCTime' :: UTCTime -> UTCTime -> Double
+diffUTCTime' t1 t0 = realToFrac (t1 `diffUTCTime` t0)
 
 -- | Write cache manifests after successful generation
 writeCache :: Config -> CompiledPath -> IO ()
