@@ -7,6 +7,7 @@ module SynapseCC.Discover
   ) where
 
 import Control.Exception (catch, SomeException, try)
+import System.Exit (ExitCode)
 import Control.Monad (forM, when)
 import Data.List (sortBy, maximumBy)
 import Data.Maybe (catMaybes)
@@ -15,7 +16,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import System.Directory (doesFileExist, doesDirectoryExist, findExecutable, getHomeDirectory, listDirectory, getModificationTime)
 import System.FilePath ((</>))
-import System.Process (readProcess)
+import System.Process (readProcessWithExitCode)
 
 import SynapseCC.Logging (logDebug, logInfo)
 import SynapseCC.Types
@@ -119,10 +120,10 @@ toolPathToFilePath = \case
 -- Returns @"unknown"@ if the call fails for any reason.
 getToolVersion :: FilePath -> IO Text
 getToolVersion exe = do
-  result <- try (readProcess exe ["--version"] "") :: IO (Either SomeException String)
+  result <- try (readProcessWithExitCode exe ["--version"] "") :: IO (Either SomeException (ExitCode, String, String))
   case result of
-    Left _   -> pure "unknown"
-    Right out ->
+    Left _             -> pure "unknown"
+    Right (_, out, _) ->
       let firstLine = head (lines out ++ [""])
           stripped  = case T.unpack (T.strip (T.pack firstLine)) of
             ('v':rest) -> rest
