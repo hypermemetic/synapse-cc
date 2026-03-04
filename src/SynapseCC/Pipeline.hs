@@ -28,6 +28,7 @@ import SynapseCC.Process
 import SynapseCC.Discover
 import qualified SynapseCC.Language as Language
 import qualified SynapseCC.Cache as Cache
+import SynapseCC.Cache (getCacheDir)
 
 -- ============================================================================
 -- Pipeline Orchestration
@@ -68,9 +69,13 @@ runFullPipeline config tools = do
   let debug  = optDebug (cfgOptions config)
       opts   = cfgOptions config
       Backend backendName = cfgBackend config
-      targetName = T.pack $ show (cfgTarget config)
+      targetName = case cfgTarget config of
+        TypeScript -> "typescript"
+        Python     -> "python"
+        Rust       -> "rust"
 
   pipelineStart <- getCurrentTime
+  cacheDir <- getCacheDir opts
 
   -- Step 1: Generate IR
   logStep "Generating IR..."
@@ -155,7 +160,7 @@ runFullPipeline config tools = do
                                        , ("tests",               testMs)
                                        ]
                           ts       = T.pack $ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" pipelineEnd
-                          bPath    = baselinePath (optCacheDir opts) targetName backendName
+                          bPath    = baselinePath cacheDir targetName backendName
 
                       reportBenchmarks bPath backendName targetName ts steps totalMs
 
