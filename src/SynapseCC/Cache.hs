@@ -77,7 +77,7 @@ getIRCacheDir opts backend = do
 getCodeCacheDir :: Options -> Backend -> Target -> IO FilePath
 getCodeCacheDir opts backend target = do
   baseDir <- getCacheDir opts
-  pure $ baseDir </> "hub-codegen" </> targetName target </> T.unpack (backendName backend)
+  pure $ baseDir </> "synapse-cc" </> "code" </> targetName target </> T.unpack (backendName backend)
   where
     targetName TypeScript = "typescript"
     targetName Python = "python"
