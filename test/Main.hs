@@ -12,15 +12,22 @@ import Data.Char (isAlpha, isDigit)
 import Data.List (isInfixOf, isPrefixOf, find)
 import Data.Maybe (isJust, mapMaybe)
 import qualified Data.Text as T
+import qualified Data.Text.IO as TIO
 import System.Directory
   ( doesDirectoryExist, doesFileExist, findExecutable
   , getTemporaryDirectory, listDirectory
   , createDirectoryIfMissing, removeDirectoryRecursive
+  , withCurrentDirectory
   )
-import System.Environment (lookupEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeExtension)
 import System.Process (readProcessWithExitCode, CreateProcess(..), proc, readCreateProcessWithExitCode)
+import GHC.IO.Encoding (setLocaleEncoding, utf8)
+import Options.Applicative (execParserPure, defaultPrefs, getParseResult)
+import SynapseCC.CLI (synapseCCParserInfo)
+import SynapseCC.Discover (discoverTools)
+import SynapseCC.Pipeline (runPipeline)
+import SynapseCC.Types (Config(..), Options(..), defaultOptions, formatError)
 
 -- | Shared test context: the path to generated output
 data TestEnv = TestEnv
@@ -28,6 +35,12 @@ data TestEnv = TestEnv
   , tePipelineRan :: !Bool  -- True if we ran synapse-cc, False if using existing generated/
   , tePipelineExit :: !ExitCode
   , tePipelineError :: !String  -- Captured error output when pipeline fails
+  }
+
+-- | Test context for Tauri integration: output goes into a plexus/ subdir
+data TauriTestEnv = TauriTestEnv
+  { taOutputDir :: !FilePath  -- the generated output dir (proj </> "plexus")
+  , taProjDir   :: !FilePath  -- the project root (has user-owned package.json)
   }
 
 -- | Recursively find all files with a given extension
@@ -155,74 +168,89 @@ replaceWsUrls content@(c:cs) newUrl
       in newUrl ++ after
   | otherwise = c : replaceWsUrls cs newUrl
 
--- | Discover the synapse-cc binary
-findSynapseCCBin :: IO (Maybe FilePath)
-findSynapseCCBin = do
-  -- 1. SYNAPSE_CC_BIN env var
-  envBin <- lookupEnv "SYNAPSE_CC_BIN"
-  case envBin of
-    Just p -> do
-      exists <- doesFileExist p
-      return $ if exists then Just p else Nothing
-    Nothing -> do
-      -- 2. dist-newstyle build path
-      let distPath = "dist-newstyle/build/aarch64-osx/ghc-9.6.7/synapse-cc-0.1.0.0/x/synapse-cc/build/synapse-cc/synapse-cc"
-      distExists <- doesFileExist distPath
-      if distExists
-        then return (Just distPath)
-        else do
-          -- 3. findExecutable on PATH
-          findExecutable "synapse-cc"
-
--- | Set up the test environment by running the pipeline or falling back to generated/
+-- | Set up the test environment by running the pipeline in-process
 setupTestEnv :: IO TestEnv
 setupTestEnv = do
-  mBin <- findSynapseCCBin
-  case mBin of
-    Nothing -> do
-      putStrLn "WARNING: synapse-cc binary not found, using existing generated/ directory"
-      genExists <- doesDirectoryExist "generated"
-      unless genExists $
-        fail "No synapse-cc binary and no generated/ directory found"
-      return TestEnv
-        { teOutputDir = "generated"
-        , tePipelineRan = False
-        , tePipelineExit = ExitSuccess
-        , tePipelineError = "synapse-cc binary not found"
-        }
-    Just bin -> do
-      tmpBase <- getTemporaryDirectory
-      let tmpDir = tmpBase </> "synapse-cc-test-output"
-      -- Clean up from previous runs
-      tmpExists <- doesDirectoryExist tmpDir
-      when tmpExists $ removeDirectoryRecursive tmpDir
-      createDirectoryIfMissing True tmpDir
-      putStrLn $ "Running synapse-cc pipeline: " ++ bin
-      (exit, stdout, stderr) <- runProc Nothing bin
-        [ "typescript", "substrate"
-        , "-P", "4444"
-        , "-o", tmpDir
-        , "--force"
-        , "--no-install"
-        , "--no-build"
-        , "--no-tests"
-        ]
-      case exit of
-        ExitSuccess -> do
-          putStrLn $ "Pipeline succeeded, output in: " ++ tmpDir
-          return TestEnv
-            { teOutputDir = tmpDir
-            , tePipelineRan = True
-            , tePipelineExit = ExitSuccess
-            , tePipelineError = ""
-            }
-        ExitFailure code -> do
-          let output = if null stderr then stdout else stderr
-          fail $ "Pipeline failed (exit " ++ show code ++ "): " ++ take 500 output
+  tmpBase <- getTemporaryDirectory
+  let tmpDir = tmpBase </> "synapse-cc-test-output"
+  tmpExists <- doesDirectoryExist tmpDir
+  when tmpExists $ removeDirectoryRecursive tmpDir
+  createDirectoryIfMissing True tmpDir
+
+  -- Parse args exactly as the CLI would, using the real parser
+  let args = [ "typescript", "substrate"
+             , "-P", "4444"
+             , "-o", tmpDir
+             , "--force"
+             , "--no-build"
+             , "--no-tests"
+             ]
+  config <- case getParseResult (execParserPure defaultPrefs synapseCCParserInfo args) of
+    Nothing -> fail "Failed to parse synapse-cc arguments"
+    Just c  -> return c
+
+  toolsResult <- discoverTools (cfgOptions config)
+  tools <- case toolsResult of
+    Left err -> fail $ T.unpack (formatError err)
+    Right t  -> return t
+  -- Run pipeline with cwd = tmpDir to simulate standalone use:
+  -- the user runs synapse-cc from the directory that becomes the package root.
+  result <- withCurrentDirectory tmpDir $ runPipeline config tools
+  case result of
+    Left err -> fail $ T.unpack (formatError err)
+    Right _  -> return TestEnv
+      { teOutputDir    = tmpDir
+      , tePipelineRan  = True
+      , tePipelineExit = ExitSuccess
+      , tePipelineError = ""
+      }
+
+-- | Set up the Tauri test environment: a user-owned project with a plexus/ output subdir
+setupTauriTestEnv :: IO TauriTestEnv
+setupTauriTestEnv = do
+  tmpBase <- getTemporaryDirectory
+  let tmpDir = tmpBase </> "synapse-cc-tauri-test"
+  tmpExists <- doesDirectoryExist tmpDir
+  when tmpExists $ removeDirectoryRecursive tmpDir
+  createDirectoryIfMissing True tmpDir
+
+  -- Write a user-owned package.json (no _generatedBy marker = integration mode)
+  writeFile (tmpDir </> "package.json") $
+    "{\n  \"name\": \"my-tauri-app\",\n  \"version\": \"0.0.0\",\n  \"type\": \"module\",\n  \"private\": true\n}\n"
+
+  -- Output goes into a plexus/ subdirectory (like a real Tauri integration)
+  let outputDir = tmpDir </> "plexus"
+
+  let args = [ "typescript", "substrate"
+             , "-P", "4444"
+             , "-o", outputDir
+             , "--transport", "browser"
+             , "--force"
+             , "--no-build"
+             , "--no-tests"
+             ]
+  config <- case getParseResult (execParserPure defaultPrefs synapseCCParserInfo args) of
+    Nothing -> fail "Failed to parse tauri synapse-cc arguments"
+    Just c  -> return c
+
+  toolsResult <- discoverTools (cfgOptions config)
+  tools <- case toolsResult of
+    Left err -> fail $ T.unpack (formatError err)
+    Right t  -> return t
+
+  result <- withCurrentDirectory tmpDir $ runPipeline config tools
+  case result of
+    Left err -> fail $ T.unpack (formatError err)
+    Right _  -> return TauriTestEnv
+      { taOutputDir = outputDir
+      , taProjDir   = tmpDir
+      }
 
 main :: IO ()
 main = do
+  setLocaleEncoding utf8
   env <- setupTestEnv
+  tauriEnv <- setupTauriTestEnv
   let dir = teOutputDir env
   hspec $ do
     -- ═══════════════════════════════════════════
@@ -456,45 +484,45 @@ main = do
     -- Section 7: TypeScript smoke tests
     -- ═══════════════════════════════════════════
     describe "TypeScript smoke tests" $ do
-      it "npm install exits 0" $ do
-        npmAvail <- findExecutable "npm"
-        case npmAvail of
-          Nothing -> pendingWith "npm not found on PATH"
-          Just npm -> do
-            let p = (proc npm ["install"]) { cwd = Just dir }
+      it "bun install exits 0" $ do
+        bunAvail <- findExecutable "bun"
+        case bunAvail of
+          Nothing -> pendingWith "bun not found on PATH"
+          Just bun -> do
+            let p = (proc bun ["install"]) { cwd = Just dir }
             (exit, stdout, stderr) <- readCreateProcessWithExitCode p ""
             case exit of
               ExitSuccess -> return ()
               ExitFailure 127 -> pendingWith $
-                "node runtime unavailable: " ++ take 200 (stderr ++ stdout)
+                "bun runtime unavailable: " ++ take 200 (stderr ++ stdout)
               ExitFailure c -> expectationFailure $
-                "npm install failed (exit " ++ show c ++ "): "
+                "bun install failed (exit " ++ show c ++ "): "
                 ++ take 500 (stderr ++ stdout)
 
-      it "npx tsc --noEmit exits 0" $ do
-        npxAvail <- findExecutable "npx"
-        case npxAvail of
-          Nothing -> pendingWith "npx not found on PATH"
-          Just npx -> do
+      it "bun x tsc --noEmit exits 0" $ do
+        bunAvail <- findExecutable "bun"
+        case bunAvail of
+          Nothing -> pendingWith "bun not found on PATH"
+          Just bun -> do
             nodeModules <- doesDirectoryExist (dir </> "node_modules")
-            unless nodeModules $ pendingWith "node_modules not found (npm install may have failed)"
-            let p = (proc npx ["tsc", "--noEmit"]) { cwd = Just dir }
+            unless nodeModules $ pendingWith "node_modules not found (bun install may have failed)"
+            let p = (proc bun ["x", "tsc", "--noEmit"]) { cwd = Just dir }
             (exit, stdout, stderr) <- readCreateProcessWithExitCode p ""
             case exit of
               ExitSuccess -> return ()
               ExitFailure 127 -> pendingWith $
-                "node runtime unavailable: " ++ take 200 (stderr ++ stdout)
+                "bun runtime unavailable: " ++ take 200 (stderr ++ stdout)
               ExitFailure c -> expectationFailure $
                 "tsc --noEmit failed (exit " ++ show c ++ "): "
                 ++ take 500 (stderr ++ stdout)
 
-      it "npm test exits 0" $ do
-        npmAvail <- findExecutable "npm"
-        case npmAvail of
-          Nothing -> pendingWith "npm not found on PATH"
-          Just npm -> do
+      it "bun test exits 0" $ do
+        bunAvail <- findExecutable "bun"
+        case bunAvail of
+          Nothing -> pendingWith "bun not found on PATH"
+          Just bun -> do
             nodeModules <- doesDirectoryExist (dir </> "node_modules")
-            unless nodeModules $ pendingWith "node_modules not found (npm install may have failed)"
+            unless nodeModules $ pendingWith "node_modules not found (bun install may have failed)"
             -- Discover substrate's actual URL through the registry and patch
             -- the smoke test if it points at the wrong port (e.g. registry port)
             let smokeTest = dir </> "test" </> "smoke.test.ts"
@@ -504,15 +532,136 @@ main = do
               case mUrl of
                 Just url -> patchSmokeTestUrl smokeTest url
                 Nothing -> putStrLn "  Could not discover substrate URL, running smoke test as-is"
-            let p = (proc npm ["test"]) { cwd = Just dir }
+            let p = (proc bun ["test"]) { cwd = Just dir }
             (exit, stdout, stderr) <- readCreateProcessWithExitCode p ""
             case exit of
               ExitSuccess -> return ()
               ExitFailure 127 -> pendingWith $
-                "node runtime unavailable: " ++ take 200 (stderr ++ stdout)
+                "bun runtime unavailable: " ++ take 200 (stderr ++ stdout)
               ExitFailure c -> expectationFailure $
-                "npm test failed (exit " ++ show c ++ "):\n"
+                "bun test failed (exit " ++ show c ++ "):\n"
                 ++ take 500 stdout ++ "\n" ++ take 500 stderr
+
+    -- ═══════════════════════════════════════════
+    -- Section 8: Tauri (browser transport)
+    -- ═══════════════════════════════════════════
+    describe "Tauri (browser transport)" $ do
+      let tdir = taOutputDir tauriEnv
+
+      describe "Integration mode file structure" $ do
+        it "output directory exists" $ do
+          exists <- doesDirectoryExist tdir
+          exists `shouldBe` True
+
+        it "no tsconfig.json in output (integration mode)" $ do
+          exists <- doesFileExist (tdir </> "tsconfig.json")
+          exists `shouldBe` False
+
+        it "no test/ directory in output (integration mode)" $ do
+          exists <- doesDirectoryExist (tdir </> "test")
+          exists `shouldBe` False
+
+        it "no package.json in output (host project owns it)" $ do
+          exists <- doesFileExist (tdir </> "package.json")
+          exists `shouldBe` False
+
+        let coreFiles = ["types.ts", "rpc.ts", "transport.ts", "index.ts", "ir.json"]
+        forM_ coreFiles $ \f ->
+          it ("core file exists: " ++ f) $ do
+            exists <- doesFileExist (tdir </> f)
+            exists `shouldBe` True
+
+      describe "Browser transport constraints" $ do
+        it "transport.ts has no 'import WebSocket from ws'" $ do
+          content <- readFile (tdir </> "transport.ts")
+          (("import WebSocket from 'ws'" `isInfixOf` content) ||
+           ("import WebSocket from \"ws\"" `isInfixOf` content))
+            `shouldBe` False
+
+        it "no 'export namespace' in any generated .ts file" $ do
+          tsFiles <- findFilesWithExt tdir ".ts"
+          forM_ tsFiles $ \f -> do
+            content <- readFile f
+            content `shouldSatisfy` (not . ("export namespace" `isInfixOf`))
+
+        it "no parameter properties (private readonly rpc) in any generated .ts file" $ do
+          tsFiles <- findFilesWithExt tdir ".ts"
+          forM_ tsFiles $ \f -> do
+            content <- readFile f
+            content `shouldSatisfy` (not . ("private readonly rpc" `isInfixOf`))
+
+      describe "TypeScript compilation (erasableSyntaxOnly)" $ do
+        it "tsc --noEmit with erasableSyntaxOnly: true exits 0" $ do
+          -- Write a strict tsconfig at project root targeting just the generated output
+          let tsconfigContent = unlines
+                [ "{"
+                , "  \"compilerOptions\": {"
+                , "    \"target\": \"ES2022\","
+                , "    \"module\": \"ESNext\","
+                , "    \"moduleResolution\": \"bundler\","
+                , "    \"strict\": true,"
+                , "    \"erasableSyntaxOnly\": true,"
+                , "    \"noUnusedLocals\": true,"
+                , "    \"lib\": [\"ES2022\", \"DOM\"]"
+                , "  },"
+                , "  \"include\": [\"plexus/**/*.ts\"]"
+                , "}"
+                ]
+          writeFile (taProjDir tauriEnv </> "tsconfig.tauri-check.json") tsconfigContent
+          let cp = (proc "bun" ["x", "tsc", "--noEmit", "-p", "tsconfig.tauri-check.json"])
+                     { cwd = Just (taProjDir tauriEnv) }
+          (exit, stdout, stderr) <- readCreateProcessWithExitCode cp ""
+          when (exit /= ExitSuccess) $
+            expectationFailure $ "tsc with erasableSyntaxOnly failed:\n" ++ stdout ++ stderr
+          exit `shouldBe` ExitSuccess
+
+    -- ═══════════════════════════════════════════
+    -- Section 9: Merge and cache invariants
+    -- ═══════════════════════════════════════════
+    -- These tests run a second pipeline against the already-generated dir
+    -- to verify the two most important correctness guarantees:
+    --   (a) user edits survive a normal rerun (three-way merge skips modified files)
+    --   (b) --force overwrites user edits (explicit opt-in to overwrite)
+    describe "Merge and cache invariants" $ do
+
+      -- Helper: run the pipeline with arbitrary extra args into `dir` as both
+      -- cwd and output, using the already-discovered tools.
+      let runAgain extraArgs = do
+            let args = [ "typescript", "substrate"
+                       , "-P", "4444"
+                       , "-o", dir
+                       , "--no-build", "--no-tests"
+                       ] ++ extraArgs
+            cfg <- case getParseResult (execParserPure defaultPrefs synapseCCParserInfo args) of
+                     Nothing -> fail "Failed to parse args for second run"
+                     Just c  -> return c
+            t <- discoverTools (cfgOptions cfg) >>= either (fail . T.unpack . formatError) return
+            withCurrentDirectory dir $ runPipeline cfg t
+
+      it "user edit in a generated file survives rerun without --force" $ do
+        -- This is the core safety guarantee of the whole system.
+        -- If it breaks, users lose work every time they regenerate.
+        let target = dir </> "rpc.ts"
+        original <- TIO.readFile target
+        let userEdit = original <> "\n// user addition — must survive rerun"
+        TIO.writeFile target userEdit
+
+        _ <- runAgain []   -- no --force
+
+        after <- TIO.readFile target
+        after `shouldBe` userEdit
+
+      it "user edit is overwritten with --force" $ do
+        -- --force must actually force; silent failure would make the flag useless.
+        let target = dir </> "rpc.ts"
+        original <- TIO.readFile target
+        let userEdit = original <> "\n// this should be gone after --force"
+        TIO.writeFile target userEdit
+
+        _ <- runAgain ["--force"]
+
+        after <- TIO.readFile target
+        after `shouldNotBe` userEdit
 
 -- | Extract identifiers from import type { ... } braces
 extractBraceContent :: String -> [String]

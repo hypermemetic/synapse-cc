@@ -1,6 +1,7 @@
 -- | Command-line interface parsing
 module SynapseCC.CLI
   ( parseArgs
+  , synapseCCParserInfo
   , versionInfo
   ) where
 
@@ -14,15 +15,17 @@ import SynapseCC.Types
 -- CLI Parser
 -- ============================================================================
 
+-- | Full parser info (usable with execParserPure for in-process testing)
+synapseCCParserInfo :: ParserInfo Config
+synapseCCParserInfo = info (configParser <**> helper <**> simpleVersioner (T.unpack versionInfo))
+  ( fullDesc
+ <> progDesc "Unified compiler toolchain for Plexus backends"
+ <> header "synapse-cc - from schema to compiled client in one command"
+  )
+
 -- | Parse command-line arguments into Config
 parseArgs :: IO Config
-parseArgs = execParser opts
-  where
-    opts = info (configParser <**> helper <**> simpleVersioner (T.unpack versionInfo))
-      ( fullDesc
-     <> progDesc "Unified compiler toolchain for Plexus backends"
-     <> header "synapse-cc - from schema to compiled client in one command"
-      )
+parseArgs = execParser synapseCCParserInfo
 
 -- | Main config parser
 configParser :: Parser Config
@@ -78,6 +81,11 @@ portParser = T.pack <$> option str
  <> help "Registry/discovery port"
   )
 
+parseTransport :: String -> Either String TransportType
+parseTransport "ws"      = Right WsTransport
+parseTransport "browser" = Right BrowserTransport
+parseTransport s         = Left $ "Unknown transport: " <> s
+
 -- | Parse options
 optionsParser :: Parser Options
 optionsParser = Options
@@ -89,10 +97,12 @@ optionsParser = Options
      <> showDefault
      <> help "Output directory"
       )
-  <*> fmap not (switch
-      ( long "no-bundle-transport"
-     <> help "Don't bundle transport code into generated output"
-      ))
+  <*> option (eitherReader parseTransport)
+      ( long "transport"
+     <> metavar "ws|browser"
+     <> value WsTransport
+     <> help "Transport: ws (Node.js, default) or browser (native WebSocket, for Tauri/WebView)"
+      )
   <*> flag True False
       ( long "no-install"
      <> help "Skip dependency installation"
@@ -137,4 +147,4 @@ optionsParser = Options
 
 -- | Version information
 versionInfo :: Text
-versionInfo = "synapse-cc v0.1.0"
+versionInfo = "synapse-cc v" <> synapseCCVersion

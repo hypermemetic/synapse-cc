@@ -1,15 +1,17 @@
 -- | Language-specific integrations (dependency install, build, etc.)
 module SynapseCC.Language
   ( installDependencies
+  , addDependencies
   , buildProject
   , runTests
   ) where
 
 import Control.Monad (when)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import System.Directory (doesFileExist, findExecutable)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
@@ -59,51 +61,53 @@ detectPackageManager :: GeneratedPath -> Bool -> IO PackageManager
 detectPackageManager (GeneratedPath path) debug = do
   when debug $ putStrLn "[*] Detecting package manager..."
 
-  -- Priority 1: Check for lockfiles
-  hasPnpmLock <- doesFileExist (path </> "pnpm-lock.yaml")
-  if hasPnpmLock
+  -- Priority 1: Check for lockfiles (most reliable signal)
+  hasBunLock  <- (||) <$> doesFileExist (path </> "bun.lock")
+                          <*> doesFileExist (path </> "bun.lockb")
+  if hasBunLock
     then do
-      when debug $ putStrLn "  [+] Found pnpm-lock.yaml, using pnpm"
-      pure Pnpm
+      when debug $ putStrLn "  [+] Found bun.lock, using bun"
+      pure Bun
     else do
-      hasYarnLock <- doesFileExist (path </> "yarn.lock")
-      if hasYarnLock
+      hasPnpmLock <- doesFileExist (path </> "pnpm-lock.yaml")
+      if hasPnpmLock
         then do
-          when debug $ putStrLn "  [+] Found yarn.lock, using yarn"
-          pure Yarn
+          when debug $ putStrLn "  [+] Found pnpm-lock.yaml, using pnpm"
+          pure Pnpm
         else do
-          -- Priority 2: Check available commands (prefer pnpm > yarn > bun > npm)
-          hasPnpm <- isJust <$> findExecutable "pnpm"
-          if hasPnpm
+          hasYarnLock <- doesFileExist (path </> "yarn.lock")
+          if hasYarnLock
             then do
-              when debug $ putStrLn "  [+] pnpm available, using pnpm"
-              pure Pnpm
+              when debug $ putStrLn "  [+] Found yarn.lock, using yarn"
+              pure Yarn
             else do
-              hasYarn <- isJust <$> findExecutable "yarn"
-              if hasYarn
+              hasNpmLock <- doesFileExist (path </> "package-lock.json")
+              if hasNpmLock
                 then do
-                  when debug $ putStrLn "  [+] yarn available, using yarn"
-                  pure Yarn
+                  when debug $ putStrLn "  [+] Found package-lock.json, using npm"
+                  pure Npm
                 else do
+                  -- Priority 2: Check available commands (prefer bun > pnpm > yarn > npm)
                   hasBun <- isJust <$> findExecutable "bun"
                   if hasBun
                     then do
                       when debug $ putStrLn "  [+] bun available, using bun"
                       pure Bun
                     else do
-                      when debug $ putStrLn "  [+] Defaulting to bun"
-                      pure Bun
-
--- | Check if package.json contains workspace protocol
-checkForWorkspaceProtocol :: GeneratedPath -> IO Bool
-checkForWorkspaceProtocol (GeneratedPath path) = do
-  let packageJson = path </> "package.json"
-  exists <- doesFileExist packageJson
-  if exists
-    then do
-      content <- TIO.readFile packageJson
-      pure $ "workspace:" `T.isInfixOf` content
-    else pure False
+                      hasPnpm <- isJust <$> findExecutable "pnpm"
+                      if hasPnpm
+                        then do
+                          when debug $ putStrLn "  [+] pnpm available, using pnpm"
+                          pure Pnpm
+                        else do
+                          hasYarn <- isJust <$> findExecutable "yarn"
+                          if hasYarn
+                            then do
+                              when debug $ putStrLn "  [+] yarn available, using yarn"
+                              pure Yarn
+                            else do
+                              when debug $ putStrLn "  [+] Defaulting to npm"
+                              pure Npm
 
 -- | Provide helpful suggestions based on error patterns
 checkInstallError :: Text -> [Text]
@@ -114,10 +118,6 @@ checkInstallError stderr
       ["Network error - check your internet connection"]
   | "ENETUNREACH" `T.isInfixOf` stderr =
       ["Network unreachable - check firewall/proxy settings"]
-  | "workspace:" `T.isInfixOf` stderr =
-      ["npm doesn't support workspace: protocol"
-      ,"Use pnpm, yarn, or bun: npm install -g pnpm && pnpm install"
-      ,"Or enable bundle-transport: --bundle-transport=true"]
   | otherwise = []
 
 -- ============================================================================
@@ -132,17 +132,6 @@ installDependencies TypeScript genPath debug = do
   -- Detect package manager
   pm <- detectPackageManager genPath debug
   let pmCmd = packageManagerCommand pm
-
-  -- Check for workspace protocol with npm (warn user)
-  when (pm == Npm) $ do
-    hasWorkspace <- checkForWorkspaceProtocol genPath
-    when hasWorkspace $ do
-      putStrLn "\nWarning: This project uses the 'workspace:*' protocol"
-      putStrLn "npm does not support workspace protocol."
-      putStrLn "\nOptions:"
-      putStrLn "  1. Use pnpm: npm install -g pnpm && pnpm install"
-      putStrLn "  2. Use yarn: npm install -g yarn && yarn install"
-      putStrLn "  3. Set --bundle-transport=true to avoid workspace dependency"
 
   -- Verify package manager is actually available
   mbPmPath <- findExecutable pmCmd
@@ -175,6 +164,38 @@ installDependencies Python _ debug = do
 installDependencies Rust _ debug = do
   when debug $ putStrLn "[*] Rust dependency installation not yet implemented (Phase 2 TODO)"
   pure $ Right ()
+
+-- | Add specific packages to the project using the detected package manager.
+-- Calls @pm add \<pkgs\>@ for runtime deps and @pm add -D \<pkgs\>@ for dev deps.
+-- No-op if both lists are empty.
+addDependencies
+  :: GeneratedPath
+  -> Map Text Text   -- ^ Runtime dependencies (name -> version)
+  -> Map Text Text   -- ^ Dev dependencies (name -> version)
+  -> Bool            -- ^ Debug
+  -> IO (Either SynapseCCError ())
+addDependencies _       deps devDeps _ | Map.null deps && Map.null devDeps = pure (Right ())
+addDependencies genPath deps devDeps debug = do
+  pm <- detectPackageManager genPath debug
+  let pmCmd = packageManagerCommand pm
+      dir   = Just (unGeneratedPath genPath)
+  -- Add runtime deps
+  rtResult <- if Map.null deps then pure (Right ()) else do
+    let pkgs = Map.keys deps
+    when debug $ putStrLn $ "  [+] " <> pmCmd <> " add " <> unwords (map T.unpack pkgs)
+    r <- runProcess pmCmd ("add" : map T.unpack pkgs) dir debug
+    pure $ case prExitCode r of
+      ExitSuccess   -> Right ()
+      ExitFailure c -> Left $ LanguageToolError (T.pack pmCmd <> " add") (prStderr r) c
+  -- Add dev deps
+  devResult <- if Map.null devDeps then pure (Right ()) else do
+    let pkgs = Map.keys devDeps
+    when debug $ putStrLn $ "  [+] " <> pmCmd <> " add -D " <> unwords (map T.unpack pkgs)
+    r <- runProcess pmCmd (["add", "-D"] <> map T.unpack pkgs) dir debug
+    pure $ case prExitCode r of
+      ExitSuccess   -> Right ()
+      ExitFailure c -> Left $ LanguageToolError (T.pack pmCmd <> " add -D") (prStderr r) c
+  pure $ rtResult >> devResult
 
 -- ============================================================================
 -- Building/Type-checking
