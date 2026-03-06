@@ -352,13 +352,11 @@ formatError = \case
       , stderr
       ]
 
-  LanguageToolError tool stderr exitCode ->
+  LanguageToolError tool output exitCode ->
     T.unlines
       [ "[!] Error: " <> tool <> " failed (exit code " <> T.pack (show exitCode) <> ")"
       , ""
-      , "  " <> summarizeStderr stderr
-      , ""
-      , "  Run with --debug for full output."
+      , output
       ]
 
   CacheError msg ->
