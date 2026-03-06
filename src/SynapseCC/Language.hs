@@ -217,11 +217,8 @@ buildProject TypeScript genPath debug = do
       when debug $ putStrLn "  [+] TypeScript type-check passed"
       pure $ Right $ CompiledPath $ unGeneratedPath genPath
     ExitFailure code -> do
-      -- tsc writes errors to stdout, not stderr
-      let output = if T.null (T.strip (prStdout result))
-                   then prStderr result
-                   else prStdout result
-      pure $ Left $ LanguageToolError "tsc" output code
+      let combined = T.unlines $ filter (not . T.null . T.strip) [prStdout result, prStderr result]
+      pure $ Left $ LanguageToolError "tsc" combined code
 
 buildProject Python genPath debug = do
   when debug $ putStrLn "[*] Python build not yet implemented (Phase 2 TODO)"
@@ -258,7 +255,5 @@ runTypeScriptTests genPath debug = do
       when debug $ putStrLn "  [+] Tests passed"
       pure $ Right ()
     ExitFailure code -> do
-      let output = if T.null (T.strip (prStdout result))
-                   then prStderr result
-                   else prStdout result
-      pure $ Left $ LanguageToolError toolLabel output code
+      let combined = T.unlines $ filter (not . T.null . T.strip) [prStdout result, prStderr result]
+      pure $ Left $ LanguageToolError toolLabel combined code
