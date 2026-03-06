@@ -25,8 +25,21 @@ cabal.project.local~
 *~
 .DS_Store
 
+# JS package managers
+node_modules/
+package.json
+bun.lockb
+pnpm-lock.yaml
+yarn.lock
+package-lock.json
+
+# Rust
+target/
+Cargo.lock
+
 # Generated
 generated/
+.generated
 .synapse-cache/
 
 # Test outputs
