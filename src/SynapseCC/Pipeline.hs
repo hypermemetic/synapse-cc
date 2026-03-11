@@ -131,8 +131,8 @@ runFullPipeline config tools = do
   pipelineStart <- getCurrentTime
   cacheDir <- getCacheDir opts
 
-  -- Step 1: Generate IR
-  logStep "Generating IR..."
+  -- Step 1: Read schema from backend
+  logStep "Reading schema..."
   (irResult, irMs) <- timeStep $ generateIR config tools
   case irResult of
     Left err -> pure $ Left err
@@ -141,7 +141,7 @@ runFullPipeline config tools = do
       let pluginCount = case eitherDecodeStrict irBytes of
             Right (ir :: IRData) -> Map.size (irdPlugins ir)
             Left _               -> 0
-      logSuccess $ "IR generated (" <> T.pack (show pluginCount) <> " plugins)"
+      logSuccess $ "Schema ready (" <> T.pack (show pluginCount) <> " plugins)"
       logDebug debug $ "  IR at " <> T.pack (unIRPath irPath)
 
       -- Step 2: Generate code
@@ -446,7 +446,7 @@ runBuildFromConfig sc opts tools =
   where
     buildTarget (name, tc) = do
       let config = buildConfigFromTarget opts sc tc
-      logStep $ "Building \"" <> name <> "\" → " <> T.pack (optOutput (cfgOptions config)) <> "..."
+      logInfo $ "Building \"" <> name <> "\" → " <> T.pack (optOutput (cfgOptions config))
       result <- runPipeline config tools
       pure (name, result)
 
