@@ -19,7 +19,9 @@ library
     import:           warnings
     exposed-modules:  SynapseCC.Types
                     , SynapseCC.CLI
+                    , SynapseCC.Config
                     , SynapseCC.Discover
+                    , SynapseCC.Lock
                     , SynapseCC.Merge
                     , SynapseCC.Pipeline
                     , SynapseCC.Process
@@ -28,10 +30,12 @@ library
                     , SynapseCC.Language
                     , SynapseCC.Logging
                     , SynapseCC.Benchmark
+                    , SynapseCC.Watch
     build-depends:    base >= 4.14 && < 5
                     , optparse-applicative >= 0.18
                     , process >= 1.6
                     , aeson >= 2.0
+                    , aeson-pretty >= 0.8
                     , bytestring >= 0.11
                     , text >= 1.2
                     , filepath >= 1.4
@@ -42,6 +46,13 @@ library
                     , cryptohash-sha256 >= 0.11
                     , base16-bytestring >= 1.0
                     , containers >= 0.6
+                    , stm >= 2.5
+                    , mtl >= 2.3
+                    , transformers >= 0.6
+                    , unordered-containers >= 0.2
+                    , fsnotify >= 0.4
+                    , plexus-protocol
+                    , plexus-synapse
     autogen-modules:  Paths_synapse_cc
     other-modules:    Paths_synapse_cc
     hs-source-dirs:   src
@@ -81,9 +92,12 @@ test-suite synapse-cc-test
                     , filepath >= 1.4
                     , process >= 1.6
                     , aeson >= 2.0
+                    , aeson-pretty >= 0.8
                     , bytestring >= 0.11
                     , containers >= 0.6
                     , optparse-applicative >= 0.18
+                    , plexus-protocol
+                    , stm >= 2.5
     default-extensions: OverloadedStrings
                       , LambdaCase
                       , ScopedTypeVariables
