@@ -71,7 +71,7 @@ main = do
 
             Right (CompiledPath outputPath) -> do
               TIO.putStrLn ""
-              logSuccess $ "Client ready at " <> T.pack outputPath
+              logSuccess $ "Client → " <> T.pack outputPath <> "/"
               exitSuccess
 
     -- ------------------------------------------------------------------
@@ -105,7 +105,7 @@ main = do
                   Left err                     ->
                     TIO.putStrLn $ "[!] " <> targetName <> ": " <> formatError err
                   Right (CompiledPath outPath) ->
-                    logSuccess $ targetName <> " ready at " <> T.pack outPath
+                    logSuccess $ targetName <> " → " <> T.pack outPath <> "/"
               if all (either (const False) (const True) . snd) results
                 then exitSuccess
                 else exitFailure
