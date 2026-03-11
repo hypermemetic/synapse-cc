@@ -4,3 +4,33 @@ forges = [
     "github",
 ]
 visibility = "public"
+
+[ci]
+skip_validate = false
+
+[[ci.runners]]
+type = "local"
+build = [
+    "cabal",
+    "build",
+]
+test = [
+    "cabal",
+    "test",
+    "all",
+]
+timeout_secs = 600
+
+[[ci.runners]]
+type = "docker"
+build = [
+    "cabal",
+    "build",
+]
+test = [
+    "cabal",
+    "test",
+    "all",
+]
+image = "haskell:latest"
+timeout_secs = 900
