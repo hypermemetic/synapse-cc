@@ -55,19 +55,48 @@ runPipeline config tools = do
   case cacheResult of
     FullCacheHit -> do
       logDebug debug "Full cache hit (versions match)"
-      -- Verify the output directory exists and contains at least one file
       let outputPath = optOutput (cfgOptions config)
-      dirExists <- doesDirectoryExist outputPath
-      files <- if dirExists
-                 then listDirectory outputPath
-                 else pure []
-      if dirExists && not (null files)
-        then do
-          logDebug debug "  Using cached output"
-          pure $ Right $ CompiledPath outputPath
-        else do
-          logDebug debug "  Cache hit but output directory missing or empty — regenerating"
-          runFullPipeline config tools
+      -- If synapse.lock has an entry for this target, verify the live irHash
+      -- before skipping.  This catches dynamic backends (e.g. fidget-spinner)
+      -- where the schema can change without a toolchain version bump.
+      lockResult <- Lock.readSynapseLock
+      case lockResult >>= Lock.lookupLockTarget outputPath of
+        Nothing ->
+          -- No lock entry — fall through to directory existence check
+          useCachedOutput debug outputPath
+        Just lt -> do
+          logDebug debug "  Checking live irHash against synapse.lock..."
+          irCheckResult <- generateIR config tools
+          case irCheckResult of
+            Left _ -> do
+              -- Backend unreachable — use cached output gracefully (offline mode)
+              logDebug debug "  Cannot reach backend — using cached output"
+              useCachedOutput debug outputPath
+            Right (IRPath irFile) -> do
+              irBytes <- BS.readFile irFile
+              -- Use the IR's own irHash field (content-stable, excludes timestamps).
+              let liveHash = case eitherDecodeStrict irBytes of
+                    Right (irData :: IRData) -> fromMaybe "" (irdIrHash irData)
+                    Left _                   -> Merge.computeFileHash (TE.decodeUtf8 irBytes)
+              if liveHash == Lock.ltIrHash lt
+                then do
+                  logDebug debug $ "  irHash unchanged (" <> T.take 8 liveHash <> "...) — using cache"
+                  useCachedOutput debug outputPath
+                else do
+                  logDebug debug $ "  irHash changed: " <> T.take 8 (Lock.ltIrHash lt)
+                                <> " → " <> T.take 8 liveHash
+                  runFullPipeline config tools
+      where
+        useCachedOutput dbg outPath = do
+          dirExists <- doesDirectoryExist outPath
+          files <- if dirExists then listDirectory outPath else pure []
+          if dirExists && not (null files)
+            then do
+              logDebug dbg "  Using cached output"
+              pure $ Right $ CompiledPath outPath
+            else do
+              logDebug dbg "  Cache hit but output directory missing or empty — regenerating"
+              runFullPipeline config tools
 
     CacheMiss reason -> do
       logDebug debug $ "Cache miss: " <> T.pack (show reason)
@@ -351,7 +380,14 @@ writeCache config tools irPath _compiledPath codegenOutput = do
 
   -- Write synapse.lock (project-level, committed to git)
   irBytes <- BS.readFile (unIRPath irPath)
-  let irHash    = Merge.computeFileHash (TE.decodeUtf8 irBytes)
+  -- Use the IR's own irHash field (content-stable, no timestamps).
+  -- Fall back to hashing the raw bytes only if the field is absent.
+  let parsedIrHash = case eitherDecodeStrict irBytes of
+        Right (irData :: IRData) -> fromMaybe "" (irdIrHash irData)
+        Left _                   -> ""
+      irHash    = if T.null parsedIrHash
+                    then Merge.computeFileHash (TE.decodeUtf8 irBytes)
+                    else parsedIrHash
       outputDir = optOutput (cfgOptions config)
       transport = case optTransport (cfgOptions config) of
                     WsTransport      -> "ws"
@@ -526,6 +562,7 @@ formatSynapseError err = case err of
 -- We only need the fields relevant for caching
 data IRData = IRData
   { irdVersion      :: !Text
+  , irdIrHash       :: !(Maybe Text)   -- ^ Content-stable hash of schema (no timestamps)
   , irdPlugins      :: !(Map.Map Text [Text])
   , irdPluginHashes :: !(Maybe (Map.Map Text PluginHashInfo))
   } deriving stock (Show, Generic)
@@ -533,6 +570,7 @@ data IRData = IRData
 instance FromJSON IRData where
   parseJSON = Aeson.withObject "IRData" $ \o -> IRData
     <$> o Aeson..: "irVersion"
+    <*> o Aeson..:? "irHash"
     <*> o Aeson..: "irPlugins"
     <*> o Aeson..:? "irPluginHashes"
 

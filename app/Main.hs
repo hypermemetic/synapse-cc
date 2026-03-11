@@ -102,8 +102,13 @@ main = do
               results <- runBuildFromConfig sc opts tools
               forM_ results $ \(targetName, result) ->
                 case result of
-                  Left err                     ->
-                    TIO.putStrLn $ "[!] " <> targetName <> ": " <> formatError err
+                  Left err ->
+                    -- formatError includes its own "[!] Error: " prefix — strip it
+                    -- to avoid "[!] target: [!] Error: ..." doubling
+                    let msg = T.strip (formatError err)
+                        bare = maybe msg T.strip (T.stripPrefix "[!] Error:" msg
+                                               >>= Just . T.stripStart)
+                    in logError $ targetName <> ": " <> bare
                   Right (CompiledPath outPath) ->
                     logSuccess $ targetName <> " → " <> T.pack outPath <> "/"
               if all (either (const False) (const True) . snd) results
