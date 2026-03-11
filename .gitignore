@@ -29,6 +29,13 @@ cabal.project.local~
 generated/
 .synapse-cache/
 
+# Test run artifacts (from running synapse-cc inside this directory)
+node_modules/
+bun.lock
+package.json
+synapse.lock
+synapse.config.json
+
 # Test outputs
 *.log
 
