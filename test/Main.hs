@@ -2,15 +2,24 @@ module Main (main) where
 
 import Test.Hspec
 
-import Control.Monad (forM_, when, unless)
+import Control.Concurrent (threadDelay)
+import Control.Exception (try, SomeException)
+import Control.Monad (forM_, when, unless, void)
 import Data.Aeson (Value(..), decode)
+import qualified Data.Aeson as Aeson
+import Data.Aeson ((.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KM
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC8
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.Char (isAlpha, isDigit)
+import Data.Either (isLeft, isRight)
 import Data.List (isInfixOf, isPrefixOf, find)
-import Data.Maybe (isJust, mapMaybe)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (isJust, isNothing, mapMaybe)
+import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Directory
@@ -21,13 +30,32 @@ import System.Directory
   )
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeExtension)
-import System.Process (readProcessWithExitCode, CreateProcess(..), proc, readCreateProcessWithExitCode)
+import System.Process
+  ( readProcessWithExitCode, CreateProcess(..), proc
+  , readCreateProcessWithExitCode, createProcess, terminateProcess
+  , waitForProcess, std_out, std_err, StdStream(..)
+  )
 import GHC.IO.Encoding (setLocaleEncoding, utf8)
 import Options.Applicative (execParserPure, defaultPrefs, getParseResult)
-import SynapseCC.CLI (synapseCCParserInfo)
+import Plexus.Client (SubstrateConfig(..), defaultConfig)
+import qualified Plexus.Transport as Transport
+import Plexus.Types (TransportError(..), PlexusStreamItem)
+import SynapseCC.CLI (synapseCCParserInfo, synapseCCCommandParserInfo)
+import SynapseCC.Config (loadSynapseConfig, validateSynapseConfig, initSynapseConfig, synapseConfigPath)
 import SynapseCC.Discover (discoverTools)
 import SynapseCC.Pipeline (runPipeline)
-import SynapseCC.Types (Config(..), Options(..), defaultOptions, formatError)
+import SynapseCC.Types
+  ( Config(..), Backend(..), Target(..), Options(..), defaultOptions, formatError
+  , SynapseConfig(..), TargetConfig(..), WatchConfig(..)
+  , WatchArgs(..), Command(..)
+  , defaultSynapseConfig
+  , TransportType(..)
+  )
+import SynapseCC.Watch
+  ( matchesAnyPrefix, parseUrl, extractPluginHashesFromBytes
+  , filterTargets, buildConfigFromTarget
+  , fetchBackendHash
+  )
 
 -- | Shared test context: the path to generated output
 data TestEnv = TestEnv
@@ -663,6 +691,603 @@ main = do
         after <- TIO.readFile target
         after `shouldNotBe` userEdit
 
+    -- ═══════════════════════════════════════════
+    -- Section 10: synapse.config.json
+    -- ═══════════════════════════════════════════
+    describe "synapse.config.json" $ do
+
+      describe "initSynapseConfig" $ do
+        it "creates a valid JSON file" $ do
+          tmpBase <- getTemporaryDirectory
+          let dir' = tmpBase </> "synapse-cc-init-test"
+          tmpExists <- doesDirectoryExist dir'
+          when tmpExists $ removeDirectoryRecursive dir'
+          createDirectoryIfMissing True dir'
+          result <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath
+          result `shouldBe` Right ()
+          exists <- doesFileExist (dir' </> synapseConfigPath)
+          exists `shouldBe` True
+
+        it "returns Left if file already exists" $ do
+          tmpBase <- getTemporaryDirectory
+          let dir' = tmpBase </> "synapse-cc-init-exists-test"
+          createDirectoryIfMissing True dir'
+          writeFile (dir' </> synapseConfigPath) "{}"
+          result <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath
+          result `shouldSatisfy` isLeft
+
+        it "created file round-trips through loadSynapseConfig" $ do
+          tmpBase <- getTemporaryDirectory
+          let dir' = tmpBase </> "synapse-cc-init-roundtrip-test"
+          tmpExists <- doesDirectoryExist dir'
+          when tmpExists $ removeDirectoryRecursive dir'
+          createDirectoryIfMissing True dir'
+          _ <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath
+          result <- withCurrentDirectory dir' loadSynapseConfig
+          result `shouldSatisfy` isRight
+
+      describe "loadSynapseConfig" $ do
+        it "returns Left when file is missing" $ do
+          tmpBase <- getTemporaryDirectory
+          let dir' = tmpBase </> "synapse-cc-no-config-test"
+          tmpExists <- doesDirectoryExist dir'
+          when tmpExists $ removeDirectoryRecursive dir'
+          createDirectoryIfMissing True dir'
+          result <- withCurrentDirectory dir' loadSynapseConfig
+          result `shouldSatisfy` isLeft
+
+        it "parses the standalone fixture" $ do
+          let fixturePath = "test/fixtures/standalone.config.json"
+          exists <- doesFileExist fixturePath
+          if not exists
+            then pendingWith "test/fixtures/standalone.config.json not found"
+            else do
+              bs <- BS.readFile fixturePath
+              case Aeson.decodeStrict bs of
+                Nothing  -> expectationFailure "Fixture failed to parse as JSON"
+                Just cfg -> scBackend (cfg :: SynapseConfig) `shouldBe` "substrate"
+
+        it "fixture has two targets" $ do
+          let fixturePath = "test/fixtures/standalone.config.json"
+          exists <- doesFileExist fixturePath
+          if not exists
+            then pendingWith "test/fixtures/standalone.config.json not found"
+            else do
+              bs <- BS.readFile fixturePath
+              case Aeson.decodeStrict bs of
+                Nothing  -> expectationFailure "Fixture failed to parse"
+                Just cfg -> Map.size (scTargets (cfg :: SynapseConfig)) `shouldBe` 2
+
+      describe "validateSynapseConfig" $ do
+        it "accepts defaultSynapseConfig" $
+          validateSynapseConfig defaultSynapseConfig `shouldBe` Right ()
+
+        it "rejects empty backend" $
+          validateSynapseConfig (defaultSynapseConfig { scBackend = "" })
+            `shouldSatisfy` isLeft
+
+        it "rejects whitespace-only backend" $
+          validateSynapseConfig (defaultSynapseConfig { scBackend = "   " })
+            `shouldSatisfy` isLeft
+
+        it "rejects empty targets map" $
+          validateSynapseConfig (defaultSynapseConfig { scTargets = Map.empty })
+            `shouldSatisfy` isLeft
+
+        it "rejects target with empty generate list" $ do
+          let badTarget = TargetConfig
+                { tcGenerate  = []
+                , tcTransport = WsTransport
+                , tcOutputDir = "out"
+                , tcSmokePath = Nothing
+                }
+          let cfg = defaultSynapseConfig { scTargets = Map.singleton "t" badTarget }
+          validateSynapseConfig cfg `shouldSatisfy` isLeft
+
+        it "rejects target with empty outputDir" $ do
+          let badTarget = TargetConfig
+                { tcGenerate  = ["plugins"]
+                , tcTransport = WsTransport
+                , tcOutputDir = ""
+                , tcSmokePath = Nothing
+                }
+          let cfg = defaultSynapseConfig { scTargets = Map.singleton "t" badTarget }
+          validateSynapseConfig cfg `shouldSatisfy` isLeft
+
+      describe "JSON round-trip" $ do
+        it "encode/decode SynapseConfig preserves data" $ do
+          let cfg = defaultSynapseConfig
+          case Aeson.decode (Aeson.encode cfg) of
+            Nothing      -> expectationFailure "Failed to decode encoded SynapseConfig"
+            Just decoded -> scBackend (decoded :: SynapseConfig) `shouldBe` scBackend cfg
+
+        it "WatchConfig defaults parse correctly" $ do
+          let json = "{\"pollInterval\":500,\"hotReload\":true}"
+          case Aeson.decodeStrict (BSC8.pack json) of
+            Nothing -> expectationFailure "Failed to parse WatchConfig"
+            Just wc -> do
+              wcPollInterval (wc :: WatchConfig) `shouldBe` 500
+              wcHotReload wc `shouldBe` True
+
+    -- ═══════════════════════════════════════════
+    -- Section 11: CLI subcommand parsing
+    -- ═══════════════════════════════════════════
+    describe "CLI subcommand parsing" $ do
+      let parse args = getParseResult (execParserPure defaultPrefs synapseCCCommandParserInfo args)
+
+      describe "build subcommand" $ do
+        it "parses 'build typescript substrate'" $
+          parse ["build", "typescript", "substrate"] `shouldSatisfy` isJust
+
+        it "produces CmdBuild" $ do
+          case parse ["build", "typescript", "substrate"] of
+            Just (CmdBuild _) -> pure ()
+            other -> expectationFailure $ "Expected CmdBuild, got: " ++ show other
+
+        it "--transport browser gives BrowserTransport" $ do
+          case parse ["build", "typescript", "substrate", "--transport", "browser"] of
+            Just (CmdBuild cfg) -> optTransport (cfgOptions cfg) `shouldBe` BrowserTransport
+            _ -> expectationFailure "Parse failed or wrong command"
+
+        it "--no-install disables dep install" $ do
+          case parse ["build", "typescript", "substrate", "--no-install"] of
+            Just (CmdBuild cfg) -> optInstallDeps (cfgOptions cfg) `shouldBe` False
+            _ -> expectationFailure "Parse failed"
+
+        it "--no-build disables build step" $ do
+          case parse ["build", "typescript", "substrate", "--no-build"] of
+            Just (CmdBuild cfg) -> optBuild (cfgOptions cfg) `shouldBe` False
+            _ -> expectationFailure "Parse failed"
+
+        it "--force enables force flag" $ do
+          case parse ["build", "typescript", "substrate", "--force"] of
+            Just (CmdBuild cfg) -> optForce (cfgOptions cfg) `shouldBe` True
+            _ -> expectationFailure "Parse failed"
+
+        it "unknown target fails to parse" $
+          parse ["build", "cobol", "substrate"] `shouldSatisfy` isNothing
+
+        it "'build' with no args produces CmdBuildFromConfig" $
+          case parse ["build"] of
+            Just (CmdBuildFromConfig _) -> pure ()
+            other -> expectationFailure $ "Expected CmdBuildFromConfig, got: " ++ show other
+
+        it "'build --no-install' with no positional args passes flag through" $
+          case parse ["build", "--no-install"] of
+            Just (CmdBuildFromConfig opts) -> optInstallDeps opts `shouldBe` False
+            other -> expectationFailure $ "Expected CmdBuildFromConfig, got: " ++ show other
+
+        it "'build --force' with no positional args passes flag through" $
+          case parse ["build", "--force"] of
+            Just (CmdBuildFromConfig opts) -> optForce opts `shouldBe` True
+            other -> expectationFailure $ "Expected CmdBuildFromConfig, got: " ++ show other
+
+      describe "watch subcommand" $ do
+        it "parses 'watch substrate'" $
+          parse ["watch", "substrate"] `shouldSatisfy` isJust
+
+        it "produces CmdWatch" $ do
+          case parse ["watch", "substrate"] of
+            Just (CmdWatch _) -> pure ()
+            other -> expectationFailure $ "Expected CmdWatch, got: " ++ show other
+
+        it "backend is set correctly" $ do
+          case parse ["watch", "substrate"] of
+            Just (CmdWatch wa) -> waBackend wa `shouldBe` "substrate"
+            _ -> expectationFailure "Parse failed"
+
+        it "no plugin args -> empty list" $ do
+          case parse ["watch", "substrate"] of
+            Just (CmdWatch wa) -> waPlugins wa `shouldBe` []
+            _ -> expectationFailure "Parse failed"
+
+        it "plugin args become prefix filters" $ do
+          case parse ["watch", "substrate", "echo", "health"] of
+            Just (CmdWatch wa) -> waPlugins wa `shouldBe` ["echo", "health"]
+            other -> expectationFailure $ "Expected CmdWatch with plugins, got: " ++ show other
+
+        it "--target pins to a named target" $ do
+          case parse ["watch", "substrate", "echo", "--target", "client"] of
+            Just (CmdWatch wa) -> waTarget wa `shouldBe` Just "client"
+            other -> expectationFailure $ show other
+
+        it "no --target -> Nothing" $ do
+          case parse ["watch", "substrate"] of
+            Just (CmdWatch wa) -> waTarget wa `shouldBe` Nothing
+            _ -> expectationFailure "Parse failed"
+
+      describe "init subcommand" $ do
+        it "parses 'init'" $
+          parse ["init"] `shouldSatisfy` isJust
+
+        it "produces CmdInit" $ do
+          case parse ["init"] of
+            Just CmdInit -> pure ()
+            other -> expectationFailure $ "Expected CmdInit, got: " ++ show other
+
+      describe "legacy build parser compatibility" $ do
+        it "synapseCCParserInfo still parses old-style args" $
+          getParseResult (execParserPure defaultPrefs synapseCCParserInfo
+            ["typescript", "substrate", "--no-build", "--no-tests"])
+            `shouldSatisfy` isJust
+
+    -- ═══════════════════════════════════════════
+    -- Section 12: Watch utilities (pure)
+    -- ═══════════════════════════════════════════
+    describe "Watch utilities" $ do
+
+      describe "matchesAnyPrefix" $ do
+        it "exact match" $
+          matchesAnyPrefix ["echo"] "echo" `shouldBe` True
+        it "prefix.child match" $
+          matchesAnyPrefix ["echo"] "echo.workspace" `shouldBe` True
+        it "deep prefix match" $
+          matchesAnyPrefix ["echo"] "echo.workspace.repos" `shouldBe` True
+        it "does NOT match substring without dot" $
+          matchesAnyPrefix ["echo"] "echoes" `shouldBe` False
+        it "does NOT match unrelated namespace" $
+          matchesAnyPrefix ["echo"] "health" `shouldBe` False
+        it "empty filter list matches nothing" $
+          matchesAnyPrefix [] "echo" `shouldBe` False
+        it "multiple prefixes, first matches" $
+          matchesAnyPrefix ["echo", "health"] "echo.run" `shouldBe` True
+        it "multiple prefixes, second matches" $
+          matchesAnyPrefix ["echo", "health"] "health.status" `shouldBe` True
+        it "multiple prefixes, none match" $
+          matchesAnyPrefix ["echo", "health"] "cone.render" `shouldBe` False
+
+      describe "parseUrl" $ do
+        it "ws://localhost:4444" $
+          parseUrl "ws://localhost:4444" `shouldBe` ("localhost", "4444")
+        it "ws://127.0.0.1:4444" $
+          parseUrl "ws://127.0.0.1:4444" `shouldBe` ("127.0.0.1", "4444")
+        it "wss://host:8443" $
+          parseUrl "wss://host:8443" `shouldBe` ("host", "8443")
+        it "path after port is ignored" $
+          snd (parseUrl "ws://localhost:4444/backend") `shouldBe` "4444"
+        it "defaults port to 4444 when missing" $
+          snd (parseUrl "ws://localhost") `shouldBe` "4444"
+        it "custom port 9999" $
+          snd (parseUrl "ws://myhost:9999") `shouldBe` "9999"
+
+      describe "extractPluginHashesFromBytes" $ do
+        it "returns empty map for invalid JSON" $
+          extractPluginHashesFromBytes "not json" `shouldBe` Map.empty
+
+        it "returns empty map for JSON without irPluginHashes" $
+          extractPluginHashesFromBytes "{\"irVersion\":\"2.0\"}" `shouldBe` Map.empty
+
+        it "extracts hash from irPluginHashes" $ do
+          let ir = BSC8.pack "{\"irPluginHashes\":{\"echo\":{\"hash\":\"abc123\",\"selfHash\":\"x\",\"childrenHash\":\"y\"}}}"
+          Map.lookup "echo" (extractPluginHashesFromBytes ir) `shouldBe` Just "abc123"
+
+        it "extracts multiple plugin hashes" $ do
+          let ir = BSC8.pack "{\"irPluginHashes\":{\"echo\":{\"hash\":\"aaa\"},\"health\":{\"hash\":\"bbb\"}}}"
+          let hashes = extractPluginHashesFromBytes ir
+          Map.size hashes `shouldBe` 2
+          Map.lookup "echo"   hashes `shouldBe` Just "aaa"
+          Map.lookup "health" hashes `shouldBe` Just "bbb"
+
+        it "returns empty string for hash field missing" $ do
+          let ir = BSC8.pack "{\"irPluginHashes\":{\"echo\":{\"selfHash\":\"x\"}}}"
+          Map.lookup "echo" (extractPluginHashesFromBytes ir) `shouldBe` Just ""
+
+      describe "filterTargets" $ do
+        let mkTarget gen = TargetConfig gen WsTransport "out" Nothing
+        let targets = Map.fromList
+              [ ("client", mkTarget ["transport", "rpc", "plugins"])
+              , ("smoke",  mkTarget ["smoke"])
+              , ("all",    mkTarget ["all"])
+              , ("empty",  mkTarget ["transport"])
+              ]
+        let noPin = WatchArgs "substrate" [] Nothing Nothing defaultOptions
+
+        it "includes targets with 'plugins'" $
+          Map.member "client" (filterTargets noPin targets) `shouldBe` True
+        it "excludes targets without 'plugins' or 'all'" $
+          Map.member "smoke" (filterTargets noPin targets) `shouldBe` False
+        it "includes targets with 'all'" $
+          Map.member "all" (filterTargets noPin targets) `shouldBe` True
+        it "excludes transport-only targets" $
+          Map.member "empty" (filterTargets noPin targets) `shouldBe` False
+
+        it "--target pins to exactly one target" $ do
+          let pinned = WatchArgs "substrate" [] (Just "smoke") Nothing defaultOptions
+          Map.keys (filterTargets pinned targets) `shouldBe` ["smoke"]
+
+        it "--target for missing name returns empty" $ do
+          let pinned = WatchArgs "substrate" [] (Just "nonexistent") Nothing defaultOptions
+          filterTargets pinned targets `shouldBe` Map.empty
+
+      describe "buildConfigFromTarget" $ do
+        it "sets outputDir from target" $ do
+          let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
+          let sc  = defaultSynapseConfig { scUrl = "ws://localhost:4444" }
+          let tc  = TargetConfig ["plugins"] BrowserTransport "my/output/dir" Nothing
+          let cfg = buildConfigFromTarget wa sc tc
+          optOutput (cfgOptions cfg) `shouldBe` "my/output/dir"
+
+        it "sets transport from target" $ do
+          let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
+          let sc  = defaultSynapseConfig
+          let tc  = TargetConfig ["plugins"] BrowserTransport "out" Nothing
+          let cfg = buildConfigFromTarget wa sc tc
+          optTransport (cfgOptions cfg) `shouldBe` BrowserTransport
+
+        it "parses host from URL" $ do
+          let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
+          let sc  = defaultSynapseConfig { scUrl = "ws://myhost:9000" }
+          let tc  = TargetConfig ["plugins"] WsTransport "out" Nothing
+          let cfg = buildConfigFromTarget wa sc tc
+          cfgHost cfg `shouldBe` "myhost"
+
+        it "parses port from URL" $ do
+          let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
+          let sc  = defaultSynapseConfig { scUrl = "ws://localhost:9000" }
+          let tc  = TargetConfig ["plugins"] WsTransport "out" Nothing
+          let cfg = buildConfigFromTarget wa sc tc
+          cfgPort cfg `shouldBe` "9000"
+
+    -- ═══════════════════════════════════════════
+    -- Section 13: Standalone config-driven build
+    -- ═══════════════════════════════════════════
+    describe "Standalone config-driven build" $ do
+
+      it "init + load + pipeline produces output in configured target dir" $ do
+        -- Write the standalone fixture config, run the pipeline with
+        -- settings derived from the config, verify output lands in tcOutputDir.
+        let fixturePath = "test/fixtures/standalone.config.json"
+        fixtureExists <- doesFileExist fixturePath
+        when (not fixtureExists) $ pendingWith "test/fixtures/standalone.config.json not found"
+
+        synapseAvail <- findExecutable "synapse"
+        when (not (isJust synapseAvail)) $ pendingWith "synapse binary not found"
+
+        tmpBase <- getTemporaryDirectory
+        let projDir = tmpBase </> "synapse-cc-standalone-project"
+        tmpExists <- doesDirectoryExist projDir
+        when tmpExists $ removeDirectoryRecursive projDir
+        createDirectoryIfMissing True projDir
+
+        -- Copy fixture config into project
+        fixtureBytes <- readFile fixturePath
+        writeFile (projDir </> synapseConfigPath) fixtureBytes
+
+        -- Load config and build using the "client" target
+        cfgResult <- withCurrentDirectory projDir loadSynapseConfig
+        case cfgResult of
+          Left err -> expectationFailure $ "Config load failed: " ++ T.unpack err
+          Right synapseConfig -> do
+            case Map.lookup "client" (scTargets synapseConfig) of
+              Nothing -> expectationFailure "Expected 'client' target in fixture"
+              Just targetCfg -> do
+                let wa      = WatchArgs (scBackend synapseConfig) [] Nothing Nothing defaultOptions
+                    config  = buildConfigFromTarget wa synapseConfig targetCfg
+                    config' = config { cfgOptions = (cfgOptions config)
+                                { optInstallDeps = False
+                                , optBuild       = False
+                                , optRunTests    = False
+                                , optForce       = True
+                                , optOutput      = projDir </> tcOutputDir targetCfg
+                                } }
+                toolsResult <- discoverTools (cfgOptions config')
+                case toolsResult of
+                  Left err -> expectationFailure $ T.unpack (formatError err)
+                  Right tools -> do
+                    result <- withCurrentDirectory projDir $ runPipeline config' tools
+                    case result of
+                      Left err -> expectationFailure $ T.unpack (formatError err)
+                      Right _  -> do
+                        let outDir = projDir </> tcOutputDir targetCfg
+                        exists <- doesDirectoryExist outDir
+                        exists `shouldBe` True
+                        typesExists <- doesFileExist (outDir </> "types.ts")
+                        typesExists `shouldBe` True
+
+      it "both targets in fixture produce separate output directories" $ do
+        let fixturePath = "test/fixtures/standalone.config.json"
+        fixtureExists <- doesFileExist fixturePath
+        when (not fixtureExists) $ pendingWith "test/fixtures/standalone.config.json not found"
+        synapseAvail <- findExecutable "synapse"
+        when (not (isJust synapseAvail)) $ pendingWith "synapse binary not found"
+
+        tmpBase <- getTemporaryDirectory
+        let projDir = tmpBase </> "synapse-cc-two-targets"
+        tmpExists <- doesDirectoryExist projDir
+        when tmpExists $ removeDirectoryRecursive projDir
+        createDirectoryIfMissing True projDir
+
+        fixtureBytes <- readFile fixturePath
+        writeFile (projDir </> synapseConfigPath) fixtureBytes
+
+        cfgResult <- withCurrentDirectory projDir loadSynapseConfig
+        case cfgResult of
+          Left err -> expectationFailure $ "Config load failed: " ++ T.unpack err
+          Right synapseConfig -> do
+            toolsResult <- discoverTools defaultOptions
+            case toolsResult of
+              Left err -> expectationFailure $ T.unpack (formatError err)
+              Right tools ->
+                forM_ (Map.toList (scTargets synapseConfig)) $ \(targetName, targetCfg) -> do
+                  let wa     = WatchArgs (scBackend synapseConfig) [] Nothing Nothing defaultOptions
+                      config = buildConfigFromTarget wa synapseConfig targetCfg
+                      config' = config { cfgOptions = (cfgOptions config)
+                                  { optInstallDeps = False
+                                  , optBuild       = False
+                                  , optRunTests    = False
+                                  , optForce       = True
+                                  , optOutput      = projDir </> tcOutputDir targetCfg
+                                  } }
+                  result <- withCurrentDirectory projDir $ runPipeline config' tools
+                  case result of
+                    Left err -> expectationFailure $
+                      "Target " ++ T.unpack targetName ++ " failed: " ++ T.unpack (formatError err)
+                    Right _ -> do
+                      exists <- doesDirectoryExist (projDir </> tcOutputDir targetCfg)
+                      exists `shouldBe` True
+
+    -- Section 14: Watch integration (requires fidget-spinner binary)
+    -- ═══════════════════════════════════════════════════════════════
+    describe "Watch integration (fidget-spinner)" $ do
+
+      let testPort    = 5557 :: Int
+          testPortStr = show testPort
+
+      -- Find fidget-spinner binary (installed or build output)
+      mbFidgetBin <- runIO $ do
+        mb <- findExecutable "fidget-spinner"
+        case mb of
+          Just p  -> pure (Just p)
+          Nothing -> do
+            let buildPath = "/workspace/hypermemetic/fidget-spinner/target/debug/fidget-spinner"
+            exists <- doesFileExist buildPath
+            pure $ if exists then Just buildPath else Nothing
+
+      -- Start fidget-spinner and wait for readiness
+      -- Returns Nothing if binary not found or failed to start
+      mbHandle <- runIO $ case mbFidgetBin of
+        Nothing -> pure Nothing
+        Just bin -> do
+          (_, _, _, ph) <- createProcess (proc bin ["--port", testPortStr, "--no-register"])
+            { std_out = NoStream, std_err = NoStream }
+          -- Poll until ready (up to 5 seconds)
+          ready <- waitForFidgetReady testPort 5000
+          if ready
+            then pure (Just ph)
+            else do
+              terminateProcess ph
+              _ <- waitForProcess ph
+              pure Nothing
+
+      -- Cleanup after all tests in this section
+      afterAll_ (case mbHandle of
+        Nothing -> pure ()
+        Just ph -> terminateProcess ph >> void (waitForProcess ph)) $ do
+
+        it "fidget-spinner starts and backend hash is non-empty" $ do
+          case mbHandle of
+            Nothing -> pendingWith "fidget-spinner binary not found or failed to start"
+            Just _ -> do
+              let cfg = makeFidgetConfig testPort
+              result <- fetchBackendHash cfg "fidget-spinner"
+              result `shouldSatisfy` isRight
+              case result of
+                Right h -> T.length h `shouldSatisfy` (> 0)
+                Left _  -> pure ()
+
+        it "initial build generates fidget/client.ts with register/unregister/list" $ do
+          case mbHandle of
+            Nothing -> pendingWith "fidget-spinner binary not found or failed to start"
+            Just _ -> do
+              tmpBase <- getTemporaryDirectory
+              let projDir = tmpBase </> "synapse-cc-fidget-initial"
+              createDirectoryIfMissing True projDir
+              let outDir = projDir </> "client"
+
+              let fixturePath = "test/fixtures/fidget.config.json"
+              fixtureBytes <- readFile fixturePath
+              writeFile (projDir </> "synapse.config.json") fixtureBytes
+
+              let config = makeFidgetPipelineConfig testPort outDir
+              toolsResult <- discoverTools (cfgOptions config)
+              case toolsResult of
+                Left err -> expectationFailure $ T.unpack (formatError err)
+                Right tools -> do
+                  result <- withCurrentDirectory projDir $ runPipeline config tools
+                  case result of
+                    Left err -> expectationFailure $ T.unpack (formatError err)
+                    Right _ -> do
+                      let clientFile = outDir </> "fidget" </> "client.ts"
+                      exists <- doesFileExist clientFile
+                      exists `shouldBe` True
+                      content <- readFile clientFile
+                      content `shouldSatisfy` ("register" `isInfixOf`)
+                      content `shouldSatisfy` ("unregister" `isInfixOf`)
+                      content `shouldSatisfy` ("list" `isInfixOf`)
+                      content `shouldSatisfy` (not . ("spin" `isInfixOf`))
+
+        it "register changes the backend hash" $ do
+          case mbHandle of
+            Nothing -> pendingWith "fidget-spinner binary not found or failed to start"
+            Just _ -> do
+              let cfg = makeFidgetConfig testPort
+              Right hash1 <- fetchBackendHash cfg "fidget-spinner"
+
+              -- Register a new method
+              callFidgetRegister testPortStr "hashtest" "A method to test hash changes"
+
+              Right hash2 <- fetchBackendHash cfg "fidget-spinner"
+              hash1 `shouldNotBe` hash2
+
+              -- Cleanup: unregister it
+              callFidgetUnregister testPortStr "hashtest"
+
+        it "register + rebuild adds the method to generated TypeScript" $ do
+          case mbHandle of
+            Nothing -> pendingWith "fidget-spinner binary not found or failed to start"
+            Just _ -> do
+              tmpBase <- getTemporaryDirectory
+              let projDir = tmpBase </> "synapse-cc-fidget-rebuild"
+              createDirectoryIfMissing True projDir
+              let outDir = projDir </> "client"
+
+              -- Initial build
+              let config = makeFidgetPipelineConfig testPort outDir
+              toolsResult <- discoverTools (cfgOptions config)
+              case toolsResult of
+                Left err -> expectationFailure $ T.unpack (formatError err)
+                Right tools -> do
+                  _ <- withCurrentDirectory projDir $ runPipeline config tools
+
+                  -- Register "spin"
+                  callFidgetRegister testPortStr "spin" "Make it spin"
+
+                  -- Rebuild with --force
+                  let forceConfig = config { cfgOptions = (cfgOptions config) { optForce = True } }
+                  result <- withCurrentDirectory projDir $ runPipeline forceConfig tools
+                  case result of
+                    Left err -> expectationFailure $ T.unpack (formatError err)
+                    Right _ -> do
+                      let clientFile = outDir </> "fidget" </> "client.ts"
+                      content <- readFile clientFile
+                      content `shouldSatisfy` ("spin" `isInfixOf`)
+
+                  -- Cleanup
+                  callFidgetUnregister testPortStr "spin"
+
+        it "unregister + rebuild removes the method from generated TypeScript" $ do
+          case mbHandle of
+            Nothing -> pendingWith "fidget-spinner binary not found or failed to start"
+            Just _ -> do
+              tmpBase <- getTemporaryDirectory
+              let projDir = tmpBase </> "synapse-cc-fidget-unregister"
+              createDirectoryIfMissing True projDir
+              let outDir = projDir </> "client"
+
+              -- Register "wobble" first
+              callFidgetRegister testPortStr "wobble" "A wobble method"
+
+              -- Build with wobble present
+              let config = makeFidgetPipelineConfig testPort outDir
+              toolsResult <- discoverTools (cfgOptions config)
+              case toolsResult of
+                Left err -> expectationFailure $ T.unpack (formatError err)
+                Right tools -> do
+                  _ <- withCurrentDirectory projDir $ runPipeline config tools
+
+                  -- Unregister "wobble"
+                  callFidgetUnregister testPortStr "wobble"
+
+                  -- Rebuild with --force
+                  let forceConfig = config { cfgOptions = (cfgOptions config) { optForce = True } }
+                  result <- withCurrentDirectory projDir $ runPipeline forceConfig tools
+                  case result of
+                    Left err -> expectationFailure $ T.unpack (formatError err)
+                    Right _ -> do
+                      let clientFile = outDir </> "fidget" </> "client.ts"
+                      content <- readFile clientFile
+                      content `shouldSatisfy` (not . ("wobble" `isInfixOf`))
+
 -- | Extract identifiers from import type { ... } braces
 extractBraceContent :: String -> [String]
 extractBraceContent line =
@@ -688,3 +1313,66 @@ splitOn c s =
 -- | Strip leading/trailing whitespace
 strip :: String -> String
 strip = reverse . dropWhile (== ' ') . reverse . dropWhile (== ' ')
+
+-- ── fidget-spinner test helpers ──────────────────────────────────────────────
+
+-- | Poll until fidget-spinner is ready to serve requests.
+-- Returns True if ready within timeoutMs, False if timed out.
+waitForFidgetReady :: Int -> Int -> IO Bool
+waitForFidgetReady port timeoutMs = go (timeoutMs `div` 200)
+  where
+    go 0 = pure False
+    go n = do
+      let cfg = makeFidgetConfig port
+      result <- (try (Transport.rpcCallWith cfg "fidget-spinner.hash" Aeson.Null) :: IO (Either SomeException (Either TransportError [PlexusStreamItem])))
+      case result of
+        Right (Right (_ : _)) -> pure True
+        _ -> do
+          threadDelay 200000  -- 200ms
+          go (n - 1)
+
+-- | Build a SubstrateConfig for a local fidget-spinner on the given port.
+makeFidgetConfig :: Int -> SubstrateConfig
+makeFidgetConfig port = (defaultConfig "fidget-spinner")
+  { substrateHost = "127.0.0.1"
+  , substratePort = port
+  }
+
+-- | Build a Config for running the pipeline against fidget-spinner.
+makeFidgetPipelineConfig :: Int -> FilePath -> Config
+makeFidgetPipelineConfig port outDir =
+  Config
+    { cfgTarget  = TypeScript
+    , cfgBackend = Backend { backendName = "fidget-spinner" }
+    , cfgHost    = "127.0.0.1"
+    , cfgPort    = T.pack (show port)
+    , cfgOptions = defaultOptions
+        { optOutput      = outDir
+        , optInstallDeps = False
+        , optBuild       = False
+        , optRunTests    = False
+        , optForce       = True
+        , optTransport   = WsTransport
+        }
+    }
+
+-- | Call fidget.register via direct RPC.
+-- | Call fidget.register via the fidget-spinner.call RPC routing.
+callFidgetRegister :: String -> Text -> Text -> IO ()
+callFidgetRegister portStr name desc = do
+  let port = read portStr :: Int
+      cfg  = makeFidgetConfig port
+      innerParams = Aeson.object ["name" .= name, "description" .= desc]
+      callParams  = Aeson.object ["method" .= ("fidget.register" :: Text), "params" .= innerParams]
+  _ <- Transport.rpcCallWith cfg "fidget-spinner.call" callParams
+  pure ()
+
+-- | Call fidget.unregister via the fidget-spinner.call RPC routing.
+callFidgetUnregister :: String -> Text -> IO ()
+callFidgetUnregister portStr name = do
+  let port = read portStr :: Int
+      cfg  = makeFidgetConfig port
+      innerParams = Aeson.object ["name" .= name]
+      callParams  = Aeson.object ["method" .= ("fidget.unregister" :: Text), "params" .= innerParams]
+  _ <- Transport.rpcCallWith cfg "fidget-spinner.call" callParams
+  pure ()

@@ -7,6 +7,9 @@ module SynapseCC.Language
   ) where
 
 import Control.Monad (when)
+import Data.Aeson (eitherDecodeFileStrict, Value(..))
+import qualified Data.Aeson.Key as AKey
+import qualified Data.Aeson.KeyMap as KM
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
@@ -167,35 +170,61 @@ installDependencies Rust _ debug = do
 
 -- | Add specific packages to the project using the detected package manager.
 -- Calls @pm add \<pkgs\>@ for runtime deps and @pm add -D \<pkgs\>@ for dev deps.
--- No-op if both lists are empty.
+-- Skips packages already present in package.json (no-op on subsequent builds).
+-- Returns True if packages were actually added, False if all were already present.
 addDependencies
   :: GeneratedPath
   -> Map Text Text   -- ^ Runtime dependencies (name -> version)
   -> Map Text Text   -- ^ Dev dependencies (name -> version)
   -> Bool            -- ^ Debug
-  -> IO (Either SynapseCCError ())
-addDependencies _       deps devDeps _ | Map.null deps && Map.null devDeps = pure (Right ())
+  -> IO (Either SynapseCCError Bool)
+addDependencies _       deps devDeps _ | Map.null deps && Map.null devDeps = pure (Right False)
 addDependencies genPath deps devDeps debug = do
-  pm <- detectPackageManager genPath debug
-  let pmCmd = packageManagerCommand pm
-      dir   = Just (unGeneratedPath genPath)
-  -- Add runtime deps
-  rtResult <- if Map.null deps then pure (Right ()) else do
-    let pkgs = Map.keys deps
-    when debug $ putStrLn $ "  [+] " <> pmCmd <> " add " <> unwords (map T.unpack pkgs)
-    r <- runProcess pmCmd ("add" : map T.unpack pkgs) dir debug
-    pure $ case prExitCode r of
-      ExitSuccess   -> Right ()
-      ExitFailure c -> Left $ LanguageToolError (T.pack pmCmd <> " add") (prStderr r) c
-  -- Add dev deps
-  devResult <- if Map.null devDeps then pure (Right ()) else do
-    let pkgs = Map.keys devDeps
-    when debug $ putStrLn $ "  [+] " <> pmCmd <> " add -D " <> unwords (map T.unpack pkgs)
-    r <- runProcess pmCmd (["add", "-D"] <> map T.unpack pkgs) dir debug
-    pure $ case prExitCode r of
-      ExitSuccess   -> Right ()
-      ExitFailure c -> Left $ LanguageToolError (T.pack pmCmd <> " add -D") (prStderr r) c
-  pure $ rtResult >> devResult
+  existing <- readExistingDeps (unGeneratedPath genPath)
+  let newDeps    = Map.filterWithKey (\k _ -> k `Map.notMember` existing) deps
+      newDevDeps = Map.filterWithKey (\k _ -> k `Map.notMember` existing) devDeps
+  if Map.null newDeps && Map.null newDevDeps
+    then pure (Right False)
+    else do
+      pm <- detectPackageManager genPath debug
+      let pmCmd = packageManagerCommand pm
+          dir   = Just (unGeneratedPath genPath)
+      -- Add runtime deps
+      rtResult <- if Map.null newDeps then pure (Right ()) else do
+        let pkgs = Map.keys newDeps
+        when debug $ putStrLn $ "  [+] " <> pmCmd <> " add " <> unwords (map T.unpack pkgs)
+        r <- runProcess pmCmd ("add" : map T.unpack pkgs) dir debug
+        pure $ case prExitCode r of
+          ExitSuccess   -> Right ()
+          ExitFailure c -> Left $ LanguageToolError (T.pack pmCmd <> " add") (prStderr r) c
+      -- Add dev deps
+      devResult <- if Map.null newDevDeps then pure (Right ()) else do
+        let pkgs = Map.keys newDevDeps
+        when debug $ putStrLn $ "  [+] " <> pmCmd <> " add -D " <> unwords (map T.unpack pkgs)
+        r <- runProcess pmCmd (["add", "-D"] <> map T.unpack pkgs) dir debug
+        pure $ case prExitCode r of
+          ExitSuccess   -> Right ()
+          ExitFailure c -> Left $ LanguageToolError (T.pack pmCmd <> " add -D") (prStderr r) c
+      pure $ fmap (const True) (rtResult >> devResult)
+
+-- | Read all declared dependencies (runtime + dev) from an existing package.json.
+-- Returns an empty map if the file doesn't exist or can't be parsed.
+readExistingDeps :: FilePath -> IO (Map Text Text)
+readExistingDeps dir = do
+  let pkgPath = dir </> "package.json"
+  exists <- doesFileExist pkgPath
+  if not exists then pure Map.empty else do
+    result <- eitherDecodeFileStrict pkgPath :: IO (Either String Value)
+    case result of
+      Left _           -> pure Map.empty
+      Right (Object o) ->
+        let extract key = case KM.lookup (AKey.fromText key) o of
+              Just (Object deps) -> Map.fromList
+                [ (AKey.toText k, v')
+                | (k, String v') <- KM.toList deps ]
+              _ -> Map.empty
+        in pure $ Map.union (extract "dependencies") (extract "devDependencies")
+      Right _ -> pure Map.empty
 
 -- ============================================================================
 -- Building/Type-checking

@@ -9,10 +9,23 @@ module SynapseCC.Types
     -- * Configuration
   , Config(..)
   , Target(..)
+  , targetToText
+  , parseLanguage
   , Backend(..)
   , TransportType(..)
   , Options(..)
   , defaultOptions
+
+    -- * Synapse Config File
+  , SynapseConfig(..)
+  , TargetConfig(..)
+  , WatchConfig(..)
+  , defaultSynapseConfig
+  , defaultWatchConfig
+
+    -- * Commands (CLI subcommands)
+  , Command(..)
+  , WatchArgs(..)
 
     -- * Tool Locations
   , ToolLocations(..)
@@ -44,7 +57,9 @@ module SynapseCC.Types
 
 import Data.Aeson (FromJSON, ToJSON, fieldLabelModifier)
 import qualified Data.Aeson as Aeson
+import Data.Aeson.Types (Parser)
 import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Version (showVersion)
@@ -80,6 +95,20 @@ data Target
   | Rust
   deriving stock (Show, Eq, Ord, Generic)
   deriving anyclass (FromJSON, ToJSON)
+
+-- | Canonical Target → lowercase string (used in cache paths, manifest fields, etc.)
+targetToText :: Target -> Text
+targetToText TypeScript = "typescript"
+targetToText Python     = "python"
+targetToText Rust       = "rust"
+
+-- | Parse a language string from synapse.config.json into a Target.
+-- Unrecognised values default to TypeScript.
+parseLanguage :: Text -> Target
+parseLanguage "typescript" = TypeScript
+parseLanguage "python"     = Python
+parseLanguage "rust"       = Rust
+parseLanguage _            = TypeScript
 
 -- | Backend identifier
 data Backend = Backend
@@ -119,6 +148,136 @@ defaultOptions = Options
   , optSynapsePath     = Nothing
   , optHubCodegenPath  = Nothing
   }
+
+-- ============================================================================
+-- Synapse Config File (synapse.config.json)
+-- ============================================================================
+
+-- | Watch-mode configuration
+data WatchConfig = WatchConfig
+  { wcPollInterval :: !Int   -- ^ Milliseconds between hash polls (default: 1000)
+  , wcHotReload    :: !Bool  -- ^ Reload config on file change if valid (default: False)
+  } deriving stock (Show, Eq, Generic)
+
+instance FromJSON WatchConfig where
+  parseJSON = Aeson.withObject "WatchConfig" $ \o -> WatchConfig
+    <$> o Aeson..:? "pollInterval" Aeson..!= 1000
+    <*> o Aeson..:? "hotReload"    Aeson..!= False
+
+instance ToJSON WatchConfig where
+  toJSON wc = Aeson.object
+    [ "pollInterval" Aeson..= wcPollInterval wc
+    , "hotReload"    Aeson..= wcHotReload wc
+    ]
+
+defaultWatchConfig :: WatchConfig
+defaultWatchConfig = WatchConfig
+  { wcPollInterval = 1000
+  , wcHotReload    = False
+  }
+
+-- | Per-target configuration entry in synapse.config.json
+data TargetConfig = TargetConfig
+  { tcGenerate   :: ![Text]           -- ^ Selectors: ["transport","rpc","plugins"] or ["all"]
+  , tcTransport  :: !TransportType    -- ^ Transport for this target
+  , tcOutputDir  :: !FilePath         -- ^ Where to write generated files
+  , tcSmokePath  :: !(Maybe Text)     -- ^ Relative path to transport for smoke targets
+  } deriving stock (Show, Eq, Generic)
+
+instance FromJSON TargetConfig where
+  parseJSON = Aeson.withObject "TargetConfig" $ \o -> TargetConfig
+    <$> o Aeson..: "generate"
+    <*> (parseTransport =<< o Aeson..: "transport")
+    <*> o Aeson..: "outputDir"
+    <*> o Aeson..:? "smokePath"
+    where
+      parseTransport :: Text -> Parser TransportType
+      parseTransport "ws"      = pure WsTransport
+      parseTransport "browser" = pure BrowserTransport
+      parseTransport t         = fail $ "Unknown transport: " <> show t
+
+instance ToJSON TargetConfig where
+  toJSON tc = Aeson.object $
+    [ "generate"  Aeson..= tcGenerate tc
+    , "transport" Aeson..= (case tcTransport tc of WsTransport -> "ws" :: Text; BrowserTransport -> "browser")
+    , "outputDir" Aeson..= tcOutputDir tc
+    ] ++ case tcSmokePath tc of
+           Nothing -> []
+           Just p  -> ["smokePath" Aeson..= p]
+
+-- | Top-level synapse.config.json configuration
+data SynapseConfig = SynapseConfig
+  { scSchema         :: !Text               -- ^ Config schema version (e.g. "1.0")
+  , scLanguage       :: !Text               -- ^ Target language (e.g. "typescript")
+  , scBackend        :: !Text               -- ^ Backend identifier (e.g. "substrate")
+  , scUrl            :: !Text               -- ^ Backend WebSocket URL
+  , scPackageManager :: !Text               -- ^ Package manager (e.g. "bun")
+  , scWatch          :: !WatchConfig        -- ^ Watch mode settings
+  , scTargets        :: !(Map Text TargetConfig)  -- ^ Named build targets
+  } deriving stock (Show, Eq, Generic)
+
+instance FromJSON SynapseConfig where
+  parseJSON = Aeson.withObject "SynapseConfig" $ \o -> SynapseConfig
+    <$> o Aeson..: "schema"
+    <*> o Aeson..: "language"
+    <*> o Aeson..: "backend"
+    <*> o Aeson..:? "url"         Aeson..!= "ws://127.0.0.1:4444"
+    <*> o Aeson..:? "packageManager" Aeson..!= "bun"
+    <*> o Aeson..:? "watch"       Aeson..!= defaultWatchConfig
+    <*> o Aeson..: "targets"
+
+instance ToJSON SynapseConfig where
+  toJSON sc = Aeson.object
+    [ "schema"         Aeson..= scSchema sc
+    , "language"       Aeson..= scLanguage sc
+    , "backend"        Aeson..= scBackend sc
+    , "url"            Aeson..= scUrl sc
+    , "packageManager" Aeson..= scPackageManager sc
+    , "watch"          Aeson..= scWatch sc
+    , "targets"        Aeson..= scTargets sc
+    ]
+
+defaultSynapseConfig :: SynapseConfig
+defaultSynapseConfig = SynapseConfig
+  { scSchema         = "1.0"
+  , scLanguage       = "typescript"
+  , scBackend        = "substrate"
+  , scUrl            = "ws://127.0.0.1:4444"
+  , scPackageManager = "bun"
+  , scWatch          = defaultWatchConfig
+  , scTargets        = Map.fromList
+      [ ( "client"
+        , TargetConfig
+            { tcGenerate  = ["transport", "rpc", "plugins"]
+            , tcTransport = WsTransport
+            , tcOutputDir = "src/lib/plexus"
+            , tcSmokePath = Nothing
+            }
+        )
+      ]
+  }
+
+-- ============================================================================
+-- Commands (CLI Subcommands)
+-- ============================================================================
+
+-- | Top-level CLI command
+data Command
+  = CmdBuild Config         -- ^ Build with explicit target/backend (CLI args)
+  | CmdBuildFromConfig      -- ^ Build all targets from synapse.config.json
+      Options               -- ^ CLI flags that override per-target config
+  | CmdWatch WatchArgs      -- ^ Watch mode
+  | CmdInit                 -- ^ Scaffold synapse.config.json
+  deriving stock (Show, Eq)
+
+-- | Arguments for the watch subcommand
+data WatchArgs = WatchArgs
+  { waBackend   :: !Text         -- ^ Backend identifier (e.g. "substrate")
+  , waPlugins   :: ![Text]       -- ^ Plugin prefix filters (empty = all)
+  , waTarget    :: !(Maybe Text) -- ^ Pin to a single named config target
+  , waInterval  :: !(Maybe Int)  -- ^ Poll interval override in ms (overrides config)
+  , waOptions   :: !Options      -- ^ Inherited options (host, port, cache, debug, etc.)
+  } deriving stock (Show, Eq)
 
 -- ============================================================================
 -- Tool Locations
@@ -336,13 +495,8 @@ formatError = \case
       , "For more info: https://github.com/hypermemetic/synapse-cc"
       ]
 
-  SynapseError stderr exitCode ->
-    T.unlines
-      [ "[!] Error: synapse failed (exit code " <> T.pack (show exitCode) <> ")"
-      , ""
-      , "Output:"
-      , stderr
-      ]
+  SynapseError msg _ ->
+    "[!] Error: " <> msg <> "\n"
 
   HubCodegenError stderr exitCode ->
     T.unlines

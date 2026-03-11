@@ -1,0 +1,18 @@
+{
+  "schema": "1.0",
+  "language": "typescript",
+  "backend": "fidget-spinner",
+  "url": "ws://127.0.0.1:5557",
+  "packageManager": "bun",
+  "watch": {
+    "pollInterval": 200,
+    "hotReload": false
+  },
+  "targets": {
+    "client": {
+      "generate": ["transport", "rpc", "plugins"],
+      "transport": "ws",
+      "outputDir": "src/lib/plexus"
+    }
+  }
+}

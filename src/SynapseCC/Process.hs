@@ -43,18 +43,7 @@ runProcess exe args mbCwd debug = do
 
   (exitCode, stdout, stderr) <- readProcessWithExitCode' exe args mbCwd ""
 
-  when debug $ do
-    unless (T.null stdout) $ do
-      let len = T.length stdout
-      if len > 5000
-        then logDebug debug $ "  Stdout: <large output, " <> T.pack (show len) <> " chars, truncated>"
-        else do
-          logDebug debug "  Stdout:"
-          logDebug debug $ "    " <> stdout
-    unless (T.null stderr) $ do
-      logDebug debug "  Stderr:"
-      logDebug debug $ "    " <> stderr
-
+  logProcessOutput debug stdout stderr
   pure $ ProcessResult exitCode stdout stderr
 
 -- | Run a process with stdin input
@@ -74,23 +63,26 @@ runProcessWithInput exe args mbCwd input debug = do
 
   (exitCode, stdout, stderr) <- readProcessWithExitCode' exe args mbCwd (T.unpack input)
 
-  when debug $ do
-    unless (T.null stdout) $ do
-      let len = T.length stdout
-      if len > 5000
-        then logDebug debug $ "  Stdout: <large output, " <> T.pack (show len) <> " chars, truncated>"
-        else do
-          logDebug debug "  Stdout:"
-          logDebug debug $ "    " <> stdout
-    unless (T.null stderr) $ do
-      logDebug debug "  Stderr:"
-      logDebug debug $ "    " <> stderr
-
+  logProcessOutput debug stdout stderr
   pure $ ProcessResult exitCode stdout stderr
 
 -- ============================================================================
 -- Helpers
 -- ============================================================================
+
+-- | Log process stdout/stderr when in debug mode.
+logProcessOutput :: Bool -> Text -> Text -> IO ()
+logProcessOutput debug stdout stderr = when debug $ do
+  unless (T.null stdout) $ do
+    let len = T.length stdout
+    if len > 5000
+      then logDebug debug $ "  Stdout: <large output, " <> T.pack (show len) <> " chars, truncated>"
+      else do
+        logDebug debug "  Stdout:"
+        logDebug debug $ "    " <> stdout
+  unless (T.null stderr) $ do
+    logDebug debug "  Stderr:"
+    logDebug debug $ "    " <> stderr
 
 -- | Like readProcessWithExitCode but with working directory support
 readProcessWithExitCode'

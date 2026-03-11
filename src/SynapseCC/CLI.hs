@@ -1,7 +1,14 @@
 -- | Command-line interface parsing
 module SynapseCC.CLI
-  ( parseArgs
+  ( -- * Legacy build-only parser (for tests)
+    parseArgs
   , synapseCCParserInfo
+
+    -- * Command parser (with subcommands)
+  , parseCommand
+  , synapseCCCommandParserInfo
+
+    -- * Version
   , versionInfo
   ) where
 
@@ -12,7 +19,7 @@ import Options.Applicative
 import SynapseCC.Types
 
 -- ============================================================================
--- CLI Parser
+-- Legacy Build Parser (backward-compatible, used by tests)
 -- ============================================================================
 
 -- | Full parser info (usable with execParserPure for in-process testing)
@@ -23,7 +30,7 @@ synapseCCParserInfo = info (configParser <**> helper <**> simpleVersioner (T.unp
  <> header "synapse-cc - from schema to compiled client in one command"
   )
 
--- | Parse command-line arguments into Config
+-- | Parse command-line arguments into Config (legacy build-only)
 parseArgs :: IO Config
 parseArgs = execParser synapseCCParserInfo
 
@@ -35,6 +42,98 @@ configParser = Config
   <*> hostParser
   <*> portParser
   <*> optionsParser
+
+-- ============================================================================
+-- Command Parser (with subcommands: build, watch, init)
+-- ============================================================================
+
+-- | Full command parser info with subcommands
+synapseCCCommandParserInfo :: ParserInfo Command
+synapseCCCommandParserInfo = info (commandParser <**> helper <**> simpleVersioner (T.unpack versionInfo))
+  ( fullDesc
+ <> progDesc "Unified compiler toolchain for Plexus backends"
+ <> header "synapse-cc - from schema to compiled client in one command"
+  )
+
+-- | Parse a top-level Command
+parseCommand :: IO Command
+parseCommand = execParser synapseCCCommandParserInfo
+
+commandParser :: Parser Command
+commandParser = subparser
+  ( command "build" (info buildCommandParser
+      (progDesc "Build client from backend schema (default)"))
+ <> command "watch" (info watchCommandParser
+      (progDesc "Watch backend for changes and incrementally rebuild"))
+ <> command "init"  (info initCommandParser
+      (progDesc "Scaffold a synapse.config.json in the current directory"))
+  )
+
+buildCommandParser :: Parser Command
+buildCommandParser = mkCmd
+  <$> optional targetParser
+  <*> optional backendParser
+  <*> hostParser
+  <*> portParser
+  <*> optionsParser
+  where
+    mkCmd (Just t) (Just b) host port opts = CmdBuild (Config t b host port opts)
+    mkCmd _        _        _    _    opts = CmdBuildFromConfig opts
+
+watchCommandParser :: Parser Command
+watchCommandParser = fmap CmdWatch $ WatchArgs
+  <$> (T.pack <$> argument str
+        ( metavar "BACKEND"
+       <> help "Backend identifier (substrate, plexus, etc.)"
+        ))
+  <*> many (T.pack <$> argument str
+        ( metavar "PLUGIN..."
+       <> help "Plugin prefix filters (e.g. echo health). Empty = all plugins."
+        ))
+  <*> optional (T.pack <$> option str
+        ( long "target"
+       <> short 't'
+       <> metavar "NAME"
+       <> help "Pin to a single named target from synapse.config.json"
+        ))
+  <*> optional (option auto
+        ( long "interval"
+       <> short 'i'
+       <> metavar "MS"
+       <> help "Poll interval in milliseconds (overrides synapse.config.json)"
+        ))
+  <*> watchOptionsParser
+
+initCommandParser :: Parser Command
+initCommandParser = pure CmdInit
+
+-- | Options relevant to watch mode.
+-- host/port come from synapse.config.json (not CLI flags for watch).
+watchOptionsParser :: Parser Options
+watchOptionsParser = (\cacheDir debug synapse hub ->
+  defaultOptions
+    { optInstallDeps    = False
+    , optBuild          = False
+    , optRunTests       = False
+    , optCacheDir       = cacheDir
+    , optDebug          = debug
+    , optSynapsePath    = synapse
+    , optHubCodegenPath = hub
+    })
+  <$> option str
+      ( long "cache-dir"
+     <> metavar "DIR"
+     <> value (optCacheDir defaultOptions)
+     <> showDefault
+     <> help "Cache directory"
+      )
+  <*> switch (long "debug" <> help "Enable debug logging")
+  <*> optional (option str (long "synapse"     <> metavar "PATH" <> help "synapse binary path"))
+  <*> optional (option str (long "hub-codegen" <> metavar "PATH" <> help "hub-codegen binary path"))
+
+-- ============================================================================
+-- Shared Parsers
+-- ============================================================================
 
 -- | Parse target language
 targetParser :: Parser Target
