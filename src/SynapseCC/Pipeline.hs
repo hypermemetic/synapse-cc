@@ -447,6 +447,7 @@ runBuildFromConfig sc opts tools =
     buildTarget (name, tc) = do
       let config = buildConfigFromTarget opts sc tc
       logInfo $ "Building \"" <> name <> "\" → " <> T.pack (optOutput (cfgOptions config))
+      logDebug (optDebug opts) $ "  target \"" <> name <> "\" is defined in synapse.config.json under .targets"
       result <- runPipeline config tools
       pure (name, result)
 
