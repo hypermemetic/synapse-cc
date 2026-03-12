@@ -484,8 +484,66 @@ runBuildFromConfig sc opts tools =
       let config = buildConfigFromTarget opts sc tc
       logInfo $ "Building \"" <> name <> "\" → " <> T.pack (optOutput (cfgOptions config))
       logDebug (optDebug opts) $ "  target \"" <> name <> "\" is defined in synapse.config.json under .targets"
-      result <- runPipeline config tools
+      result <- if tcGenerate tc == ["transport"]
+                   then runTransportOnlyPipeline config tools
+                   else runPipeline config tools
       pure (name, result)
+
+-- ============================================================================
+-- Transport-Only Pipeline (no backend connection required)
+-- ============================================================================
+
+-- | Run the transport-only pipeline.
+-- transport.ts is a static template parameterised only by --transport mode,
+-- so no backend connection or IR generation is needed.
+runTransportOnlyPipeline :: Config -> ToolLocations -> IO (Either SynapseCCError CompiledPath)
+runTransportOnlyPipeline config tools = do
+  let opts      = cfgOptions config
+      debug     = optDebug opts
+      outputDir = optOutput opts
+
+  createDirectoryIfMissing True outputDir
+
+  logStep "Generating transport layer..."
+  codeResult <- generateTransportCode config tools
+  case codeResult of
+    Left err -> pure $ Left err
+    Right out -> do
+      logSuccess "Transport generated"
+      -- Three-way merge (transport.ts is static — merge handles unchanged correctly
+      -- even without a cache entry: if content matches what's on disk, skip write).
+      cachedHashes <- if optForce opts then pure Map.empty else getCachedFileHashes config
+      mergeResult  <- Merge.applyMerge (coFiles out) (coFileHashes out) cachedHashes outputDir
+      let skipped = Merge.mrSkipped mergeResult
+      unless (null skipped) $
+        logInfo $ "  ⚠  " <> T.pack (show (length skipped))
+                <> " file(s) skipped (user modifications preserved)"
+      logDebug debug "  No backend, deps, build, or tests for transport-only target"
+      pure $ Right $ CompiledPath outputDir
+
+-- | Call hub-codegen --generate transport (no IR argument needed).
+generateTransportCode :: Config -> ToolLocations -> IO (Either SynapseCCError CodegenOutput)
+generateTransportCode config tools = do
+  let debug          = optDebug (cfgOptions config)
+      hubCodegenPath = toolPathToFilePath (toolHubCodegen tools)
+      opts           = cfgOptions config
+      targetArg      = T.unpack (targetToText (cfgTarget config))
+      args =
+        [ "--target",        targetArg
+        , "--output-format", "json"
+        , "--generate",      "transport"
+        , "--transport",     case optTransport opts of
+                               WsTransport      -> "ws"
+                               BrowserTransport -> "browser"
+        ]
+  result <- runProcess hubCodegenPath args Nothing debug
+  case prExitCode result of
+    ExitSuccess ->
+      case eitherDecodeStrict (TE.encodeUtf8 (prStdout result)) of
+        Left parseErr -> pure $ Left $ HubCodegenError (T.pack parseErr) 0
+        Right out     -> pure $ Right out
+    ExitFailure code ->
+      pure $ Left $ HubCodegenError (prStderr result) code
 
 -- ============================================================================
 -- IR Generation
