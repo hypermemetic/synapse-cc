@@ -30,7 +30,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (mapMaybe, isJust)
+import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
@@ -145,7 +145,7 @@ runWatch watchArgs tools = do
 -- | Build a SubstrateConfig from watch args + synapse config URL
 makeSubstrateConfig :: WatchArgs -> SynapseConfig -> SubstrateConfig
 makeSubstrateConfig watchArgs synapseConfig =
-  let (host, portTxt) = parseUrl (scUrl synapseConfig)
+  let (host, portTxt) = parseUrl (fromMaybe "ws://127.0.0.1:4444" (scUrl synapseConfig))
       port = read (T.unpack portTxt) :: Int
       bk   = waBackend watchArgs
   in (defaultConfig bk)
@@ -197,7 +197,7 @@ handleHashChange
 handleHashChange watchArgs synapseConfig tools debug _newHash = do
   let bkName = waBackend watchArgs
       opts   = waOptions watchArgs
-      (host, portTxt) = parseUrl (scUrl synapseConfig)
+      (host, portTxt) = parseUrl (fromMaybe "ws://127.0.0.1:4444" (scUrl synapseConfig))
       port = read (T.unpack portTxt) :: Int
       pluginFilter = waPlugins watchArgs
       generatorInfo = ["synapse-cc:" <> synapseCCVersion]
@@ -382,7 +382,7 @@ filterTargets watchArgs allTargets =
 -- | Synthesize a SynapseConfig from CLI args alone (no config file)
 synapseConfigFromArgs :: WatchArgs -> SynapseConfig
 synapseConfigFromArgs watchArgs =
-  defaultSynapseConfig { scBackend = waBackend watchArgs }
+  defaultSynapseConfig { scBackend = Just (waBackend watchArgs) }
 
 -- | Parse host and port from a WebSocket URL. Alias for 'Config.parseWsUrl'.
 parseUrl :: Text -> (Text, Text)

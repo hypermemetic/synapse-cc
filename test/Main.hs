@@ -18,7 +18,7 @@ import Data.Char (isAlpha, isDigit)
 import Data.Either (isLeft, isRight)
 import Data.List (isInfixOf, isPrefixOf, find)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (isJust, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -751,7 +751,7 @@ main = do
               bs <- BS.readFile fixturePath
               case Aeson.decodeStrict bs of
                 Nothing  -> expectationFailure "Fixture failed to parse as JSON"
-                Just cfg -> scBackend (cfg :: SynapseConfig) `shouldBe` "substrate"
+                Just cfg -> scBackend (cfg :: SynapseConfig) `shouldBe` Just "substrate"
 
         it "fixture has two targets" $ do
           let fixturePath = "test/fixtures/standalone.config.json"
@@ -769,11 +769,11 @@ main = do
           validateSynapseConfig defaultSynapseConfig `shouldBe` Right ()
 
         it "rejects empty backend" $
-          validateSynapseConfig (defaultSynapseConfig { scBackend = "" })
+          validateSynapseConfig (defaultSynapseConfig { scBackend = Just "" })
             `shouldSatisfy` isLeft
 
         it "rejects whitespace-only backend" $
-          validateSynapseConfig (defaultSynapseConfig { scBackend = "   " })
+          validateSynapseConfig (defaultSynapseConfig { scBackend = Just "   " })
             `shouldSatisfy` isLeft
 
         it "rejects empty targets map" $
@@ -1008,7 +1008,7 @@ main = do
       describe "buildConfigFromTarget" $ do
         it "sets outputDir from target" $ do
           let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
-          let sc  = defaultSynapseConfig { scUrl = "ws://localhost:4444" }
+          let sc  = defaultSynapseConfig { scUrl = Just "ws://localhost:4444" }
           let tc  = TargetConfig ["plugins"] BrowserTransport "my/output/dir" Nothing
           let cfg = buildConfigFromTarget wa sc tc
           optOutput (cfgOptions cfg) `shouldBe` "my/output/dir"
@@ -1022,14 +1022,14 @@ main = do
 
         it "parses host from URL" $ do
           let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
-          let sc  = defaultSynapseConfig { scUrl = "ws://myhost:9000" }
+          let sc  = defaultSynapseConfig { scUrl = Just "ws://myhost:9000" }
           let tc  = TargetConfig ["plugins"] WsTransport "out" Nothing
           let cfg = buildConfigFromTarget wa sc tc
           cfgHost cfg `shouldBe` "myhost"
 
         it "parses port from URL" $ do
           let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
-          let sc  = defaultSynapseConfig { scUrl = "ws://localhost:9000" }
+          let sc  = defaultSynapseConfig { scUrl = Just "ws://localhost:9000" }
           let tc  = TargetConfig ["plugins"] WsTransport "out" Nothing
           let cfg = buildConfigFromTarget wa sc tc
           cfgPort cfg `shouldBe` "9000"
@@ -1265,7 +1265,7 @@ main = do
             case Map.lookup "client" (scTargets synapseConfig) of
               Nothing -> expectationFailure "Expected 'client' target in fixture"
               Just targetCfg -> do
-                let wa      = WatchArgs (scBackend synapseConfig) [] Nothing Nothing defaultOptions
+                let wa      = WatchArgs (fromMaybe "" (scBackend synapseConfig)) [] Nothing Nothing defaultOptions
                     config  = buildConfigFromTarget wa synapseConfig targetCfg
                     config' = config { cfgOptions = (cfgOptions config)
                                 { optInstallDeps = False
@@ -1313,7 +1313,7 @@ main = do
               Left err -> expectationFailure $ T.unpack (formatError err)
               Right tools ->
                 forM_ (Map.toList (scTargets synapseConfig)) $ \(targetName, targetCfg) -> do
-                  let wa     = WatchArgs (scBackend synapseConfig) [] Nothing Nothing defaultOptions
+                  let wa     = WatchArgs (fromMaybe "" (scBackend synapseConfig)) [] Nothing Nothing defaultOptions
                       config = buildConfigFromTarget wa synapseConfig targetCfg
                       config' = config { cfgOptions = (cfgOptions config)
                                   { optInstallDeps = False

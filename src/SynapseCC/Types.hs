@@ -60,6 +60,7 @@ import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (Parser)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Version (showVersion)
@@ -205,14 +206,16 @@ instance ToJSON TargetConfig where
            Nothing -> []
            Just p  -> ["smokePath" Aeson..= p]
 
--- | Top-level synapse.config.json configuration
+-- | Top-level synapse.config.json configuration.
+-- \"backend\" and \"url\" are optional when every target has generate: [\"transport\"]
+-- (transport.ts is a static template that needs no backend connection).
 data SynapseConfig = SynapseConfig
-  { scSchema         :: !Text               -- ^ Config schema version (e.g. "1.0")
-  , scLanguage       :: !Text               -- ^ Target language (e.g. "typescript")
-  , scBackend        :: !Text               -- ^ Backend identifier (e.g. "substrate")
-  , scUrl            :: !Text               -- ^ Backend WebSocket URL
-  , scPackageManager :: !Text               -- ^ Package manager (e.g. "bun")
-  , scWatch          :: !WatchConfig        -- ^ Watch mode settings
+  { scSchema         :: !Text                -- ^ Config schema version (e.g. "1.0")
+  , scLanguage       :: !Text                -- ^ Target language (e.g. "typescript")
+  , scBackend        :: !(Maybe Text)        -- ^ Backend identifier; omit for transport-only configs
+  , scUrl            :: !(Maybe Text)        -- ^ Backend WebSocket URL; omit for transport-only configs
+  , scPackageManager :: !Text                -- ^ Package manager (e.g. "bun")
+  , scWatch          :: !WatchConfig         -- ^ Watch mode settings
   , scTargets        :: !(Map Text TargetConfig)  -- ^ Named build targets
   } deriving stock (Show, Eq, Generic)
 
@@ -220,29 +223,29 @@ instance FromJSON SynapseConfig where
   parseJSON = Aeson.withObject "SynapseConfig" $ \o -> SynapseConfig
     <$> o Aeson..: "schema"
     <*> o Aeson..: "language"
-    <*> o Aeson..: "backend"
-    <*> o Aeson..:? "url"         Aeson..!= "ws://127.0.0.1:4444"
+    <*> o Aeson..:? "backend"
+    <*> o Aeson..:? "url"
     <*> o Aeson..:? "packageManager" Aeson..!= "bun"
-    <*> o Aeson..:? "watch"       Aeson..!= defaultWatchConfig
+    <*> o Aeson..:? "watch"          Aeson..!= defaultWatchConfig
     <*> o Aeson..: "targets"
 
 instance ToJSON SynapseConfig where
-  toJSON sc = Aeson.object
-    [ "schema"         Aeson..= scSchema sc
-    , "language"       Aeson..= scLanguage sc
-    , "backend"        Aeson..= scBackend sc
-    , "url"            Aeson..= scUrl sc
-    , "packageManager" Aeson..= scPackageManager sc
-    , "watch"          Aeson..= scWatch sc
-    , "targets"        Aeson..= scTargets sc
+  toJSON sc = Aeson.object $ catMaybes
+    [ Just $ "schema"         Aeson..= scSchema sc
+    , Just $ "language"       Aeson..= scLanguage sc
+    , ("backend" Aeson..=) <$> scBackend sc
+    , ("url"     Aeson..=) <$> scUrl sc
+    , Just $ "packageManager" Aeson..= scPackageManager sc
+    , Just $ "watch"          Aeson..= scWatch sc
+    , Just $ "targets"        Aeson..= scTargets sc
     ]
 
 defaultSynapseConfig :: SynapseConfig
 defaultSynapseConfig = SynapseConfig
   { scSchema         = "1.0"
   , scLanguage       = "typescript"
-  , scBackend        = "substrate"
-  , scUrl            = "ws://127.0.0.1:4444"
+  , scBackend        = Just "substrate"
+  , scUrl            = Just "ws://127.0.0.1:4444"
   , scPackageManager = "bun"
   , scWatch          = defaultWatchConfig
   , scTargets        = Map.fromList

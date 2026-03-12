@@ -17,6 +17,7 @@ import qualified Data.Aeson.Encode.Pretty as Pretty
 import qualified Data.ByteString.Lazy as BL
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import System.Directory (doesFileExist)
@@ -51,8 +52,15 @@ loadSynapseConfigFrom path = do
 -- | Validate a loaded SynapseConfig, returning the first error found.
 validateSynapseConfig :: SynapseConfig -> Either Text ()
 validateSynapseConfig cfg = do
-  requireNonEmpty "backend" (scBackend cfg)
   requireNonEmpty "language" (scLanguage cfg)
+  -- backend and url are required only when at least one target needs a backend.
+  -- A target with generate: ["transport"] is backend-free.
+  let needsBackend = any ((/= ["transport"]) . tcGenerate) (Map.elems (scTargets cfg))
+  if needsBackend
+    then case scBackend cfg of
+           Nothing -> Left "\"backend\" is required when targets need a backend connection"
+           Just b  -> requireNonEmpty "backend" b
+    else Right ()
   if Map.null (scTargets cfg)
     then Left "At least one entry under \"targets\" is required"
     else mapM_ (validateTargetConfig (scTargets cfg)) (Map.toList (scTargets cfg))
@@ -93,10 +101,12 @@ parseWsUrl url =
 -- (--debug, --force, --no-install, etc.) are inherited as-is.
 buildConfigFromTarget :: Options -> SynapseConfig -> TargetConfig -> Config
 buildConfigFromTarget opts sc tc =
-  let (host, port) = parseWsUrl (scUrl sc)
+  let url            = fromMaybe "ws://127.0.0.1:4444" (scUrl sc)
+      (host, port)   = parseWsUrl url
+      backendName    = fromMaybe "" (scBackend sc)
   in Config
        { cfgTarget  = parseLanguage (scLanguage sc)
-       , cfgBackend = Backend (scBackend sc)
+       , cfgBackend = Backend backendName
        , cfgHost    = host
        , cfgPort    = port
        , cfgOptions = opts
