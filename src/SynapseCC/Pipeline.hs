@@ -1,14 +1,18 @@
 -- | Pipeline orchestration - running the full toolchain
 module SynapseCC.Pipeline
   ( runPipeline
+  , runBuildFromConfig
   , generateIR
   , generateCode
+  , formatSynapseError
   ) where
 
+import Control.Exception (try, SomeException)
 import Control.Monad (when, unless, forM_)
 import Data.Aeson (FromJSON, eitherDecodeStrict, eitherDecodeFileStrict)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -22,7 +26,11 @@ import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileE
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 
-import SynapseCC.Benchmark (timeStep, loadBaseline, saveBaseline, baselinePath, reportBenchmarks)
+import Synapse.Monad (initEnv, runSynapseM, SynapseError(..))
+import Synapse.IR.Builder (buildIR)
+
+import SynapseCC.Benchmark (timeStep, baselinePath, reportBenchmarks)
+import SynapseCC.Config (buildConfigFromTarget)
 import SynapseCC.Logging (logDebug, logInfo, logStep, logSuccess)
 import SynapseCC.Types
 import SynapseCC.Process
@@ -31,6 +39,7 @@ import qualified SynapseCC.Language as Language
 import qualified SynapseCC.Cache as Cache
 import SynapseCC.Cache (getCacheDir)
 import qualified SynapseCC.Merge as Merge
+import qualified SynapseCC.Lock as Lock
 
 -- ============================================================================
 -- Pipeline Orchestration
@@ -46,19 +55,48 @@ runPipeline config tools = do
   case cacheResult of
     FullCacheHit -> do
       logDebug debug "Full cache hit (versions match)"
-      -- Verify the output directory exists and contains at least one file
       let outputPath = optOutput (cfgOptions config)
-      dirExists <- doesDirectoryExist outputPath
-      files <- if dirExists
-                 then listDirectory outputPath
-                 else pure []
-      if dirExists && not (null files)
-        then do
-          logDebug debug "  Using cached output"
-          pure $ Right $ CompiledPath outputPath
-        else do
-          logDebug debug "  Cache hit but output directory missing or empty — regenerating"
-          runFullPipeline config tools
+      -- If synapse.lock has an entry for this target, verify the live irHash
+      -- before skipping.  This catches dynamic backends (e.g. fidget-spinner)
+      -- where the schema can change without a toolchain version bump.
+      lockResult <- Lock.readSynapseLock
+      case lockResult >>= Lock.lookupLockTarget outputPath of
+        Nothing ->
+          -- No lock entry — fall through to directory existence check
+          useCachedOutput debug outputPath
+        Just lt -> do
+          logDebug debug "  Checking live irHash against synapse.lock..."
+          irCheckResult <- generateIR config tools
+          case irCheckResult of
+            Left _ -> do
+              -- Backend unreachable — use cached output gracefully (offline mode)
+              logDebug debug "  Cannot reach backend — using cached output"
+              useCachedOutput debug outputPath
+            Right (IRPath irFile) -> do
+              irBytes <- BS.readFile irFile
+              -- Use the IR's own irHash field (content-stable, excludes timestamps).
+              let liveHash = case eitherDecodeStrict irBytes of
+                    Right (irData :: IRData) -> fromMaybe "" (irdIrHash irData)
+                    Left _                   -> Merge.computeFileHash (TE.decodeUtf8 irBytes)
+              if liveHash == Lock.ltIrHash lt
+                then do
+                  logDebug debug $ "  irHash unchanged (" <> T.take 8 liveHash <> "...) — using cache"
+                  useCachedOutput debug outputPath
+                else do
+                  logDebug debug $ "  irHash changed: " <> T.take 8 (Lock.ltIrHash lt)
+                                <> " → " <> T.take 8 liveHash
+                  runFullPipeline config tools
+      where
+        useCachedOutput dbg outPath = do
+          dirExists <- doesDirectoryExist outPath
+          files <- if dirExists then listDirectory outPath else pure []
+          if dirExists && not (null files)
+            then do
+              logDebug dbg "  Using cached output"
+              pure $ Right $ CompiledPath outPath
+            else do
+              logDebug dbg "  Cache hit but output directory missing or empty — regenerating"
+              runFullPipeline config tools
 
     CacheMiss reason -> do
       logDebug debug $ "Cache miss: " <> T.pack (show reason)
@@ -68,9 +106,7 @@ runPipeline config tools = do
     PartialCacheHit valid invalid -> do
       let totalPlugins = length valid + length invalid
       logInfo $ T.pack (show (length invalid)) <> " of " <> T.pack (show totalPlugins)
-              <> " plugins changed — regenerating (partial regen not yet supported)"
-      -- TODO: Implement partial regeneration
-      -- For now, do full regeneration
+              <> " plugins changed — regenerating"
       runFullPipeline config tools
 
 -- | Minimal starter package.json written when none exists in the output directory.
@@ -84,22 +120,10 @@ runPipeline config tools = do
 synapseCCMarker :: Text
 synapseCCMarker = "\"_generatedBy\": \"synapse-cc\""
 
--- | Minimal starter package.json written when none exists in the output directory.
--- Includes standard scripts for the generated client; users own the name/version.
--- Dependencies are NOT listed here — they are added via `pm add` by addDependencies.
-starterPackageJson :: Text
-starterPackageJson =
-  "{\n\
-  \  \"name\": \"@plexus/client\",\n\
-  \  \"version\": \"0.0.1\",\n\
-  \  \"type\": \"module\",\n\
-  \  \"private\": true,\n\
-  \  \"_generatedBy\": \"synapse-cc\",\n\
-  \  \"scripts\": {\n\
-  \    \"test\": \"bun test\",\n\
-  \    \"typecheck\": \"bun x tsc --noEmit\"\n\
-  \  }\n\
-  \}\n"
+-- | Marker present in package.json files generated by hub-codegen.
+-- Used alongside synapseCCMarker to detect generated (standalone) output directories.
+generatedByMarker :: Text
+generatedByMarker = "\"_generatedBy\""
 
 -- | Generate tsconfig.json for the synapse-cc managed output directory.
 -- Excludes test/ so bun:test imports don't cause tsc errors — bun handles
@@ -130,17 +154,14 @@ runFullPipeline config tools = do
   let debug  = optDebug (cfgOptions config)
       opts   = cfgOptions config
       Backend backendName = cfgBackend config
-      targetName = case cfgTarget config of
-        TypeScript -> "typescript"
-        Python     -> "python"
-        Rust       -> "rust"
+      targetName = targetToText (cfgTarget config)
       outputDir = optOutput opts
 
   pipelineStart <- getCurrentTime
   cacheDir <- getCacheDir opts
 
-  -- Step 1: Generate IR
-  logStep "Generating IR..."
+  -- Step 1: Read schema from backend
+  logStep "Reading schema..."
   (irResult, irMs) <- timeStep $ generateIR config tools
   case irResult of
     Left err -> pure $ Left err
@@ -149,48 +170,74 @@ runFullPipeline config tools = do
       let pluginCount = case eitherDecodeStrict irBytes of
             Right (ir :: IRData) -> Map.size (irdPlugins ir)
             Left _               -> 0
-      logSuccess $ "IR generated (" <> T.pack (show pluginCount) <> " plugins)"
+      logSuccess $ "Schema ready (" <> T.pack (show pluginCount) <> " plugins)"
       logDebug debug $ "  IR at " <> T.pack (unIRPath irPath)
 
       -- Step 2: Generate code
       logStep "Generating code..."
-      (codeResult, codeMs) <- timeStep $ generateCode config tools irPath
+      (codeResult, codeMs) <- timeStep $ generateCode config tools irPath Nothing
       case codeResult of
         Left err -> pure $ Left err
         Right out -> do
           logSuccess $ "Code generated (" <> T.pack (show (Map.size (coFiles out))) <> " files)"
 
-          -- Package manager commands always run in cwd (the project root the user
-          -- invoked synapse-cc from), not in the output subdirectory.
-          -- Write a starter package.json there only when none exists (standalone use).
+          -- Detect standalone vs integration mode.
+          --
+          -- Check the OUTPUT directory first: if it already has a package.json with a
+          -- "_generatedBy" field, hub-codegen (or a prior synapse-cc run) wrote it
+          -- → standalone, regardless of what the CWD contains.
+          --
+          -- If outputDir has no package.json, fall back to checking the CWD: if the CWD
+          -- has a package.json without our marker, the user ran synapse-cc from inside a
+          -- host project → integration mode (Tauri, monorepo, etc.).
+          --
+          -- Integration mode strips test/ scaffolding, skips devDeps, and skips
+          -- build/test steps — the host project owns those concerns.
           cwd <- getCurrentDirectory
-          let pmPath = GeneratedPath cwd
-          let pkgJsonPath = cwd </> "package.json"
-          pkgExists <- doesFileExist pkgJsonPath
-
-          -- Integration mode: cwd has a package.json that we did NOT create.
-          -- We detect this with a "_generatedBy" marker written into our starter.
-          -- Without the marker the file belongs to the host project; strip scaffolding
-          -- (tsconfig.json, test/) that would pollute the host project's source tree.
-          -- Users can remove the marker to opt-in to integration mode at any time.
-          isOurStarter <- if pkgExists
-            then (synapseCCMarker `T.isInfixOf`) <$> TIO.readFile pkgJsonPath
-            else pure False
-          let isIntegration = pkgExists && not isOurStarter
+          let pmPath    = GeneratedPath cwd
+              cwdPkgPath = cwd </> "package.json"
+              outPkgJsonPath = outputDir </> "package.json"
+          outPkgExists <- doesFileExist outPkgJsonPath
+          isIntegration <-
+            if outPkgExists
+              then do
+                -- outputDir has a package.json — if it has _generatedBy it's ours (standalone)
+                content <- TIO.readFile outPkgJsonPath
+                pure $ not (generatedByMarker `T.isInfixOf` content)
+              else do
+                -- outputDir has no package.json — check CWD for host project
+                cwdPkgExists <- doesFileExist cwdPkgPath
+                if not cwdPkgExists
+                  then pure False
+                  else do
+                    cwdContent <- TIO.readFile cwdPkgPath
+                    pure $ not (synapseCCMarker `T.isInfixOf` cwdContent)
+          when isIntegration $
+            logInfo "  Integration mode — build and test steps skipped"
           let scaffolding k _ = "test/" `T.isPrefixOf` k
 
           -- Apply three-way merge: write safe files, skip user-modified ones.
-          -- package.json and tsconfig.json are always excluded from the merge:
-          --   package.json — managed via `pm add` in the project root
-          --   tsconfig.json — synapse-cc writes its own (see below)
+          -- tsconfig.json is always excluded: synapse-cc writes its own (see below).
+          -- package.json is excluded in integration mode (host project owns it);
+          --   in standalone mode it goes through the merge so script changes are applied.
           -- In integration mode, also exclude test/* (host project owns those).
           -- With --force, skip cached hashes so all files are written fresh.
           cachedHashes <- if optForce opts then pure Map.empty else getCachedFileHashes config
           let filesToMerge = (if isIntegration then Map.filterWithKey (fmap not . scaffolding) else id)
-                           $ Map.delete "package.json"
+                           $ (if isIntegration then Map.delete "package.json" else id)
                            $ Map.delete "tsconfig.json"
                            $ coFiles out
           mergeResult  <- Merge.applyMerge filesToMerge (coFileHashes out) cachedHashes outputDir
+
+          -- Remove stale generated files (plugins removed from backend).
+          -- Only deletes files whose on-disk hash still matches the cached hash
+          -- (i.e. the user hasn't modified them). Empty directories are pruned.
+          deleted <- Merge.cleanRemovedFiles cachedHashes (coFileHashes out) outputDir
+          unless (null deleted) $ do
+            logInfo $ "  🗑  " <> T.pack (show (length deleted))
+                    <> " stale file(s) removed (plugin removed from backend)"
+            when debug $ forM_ deleted $ \f ->
+              logDebug debug $ "      - " <> f
 
           -- Write ir.json to output dir as a reference artifact
           irContent <- BS.readFile (unIRPath irPath)
@@ -206,10 +253,6 @@ runFullPipeline config tools = do
 
           let genPath = GeneratedPath outputDir
 
-          unless pkgExists $ do
-            logDebug debug "  Writing starter package.json"
-            TIO.writeFile pkgJsonPath starterPackageJson
-
           -- Write synapse-cc's tsconfig to the output dir (standalone mode only).
           -- Integration mode: host project owns tsconfig at its root; we don't touch it.
           -- The tsconfig only covers *.ts (not test/) so tsc never sees bun:test imports.
@@ -218,29 +261,34 @@ runFullPipeline config tools = do
             TIO.writeFile (outputDir </> "tsconfig.json") (generateTsconfig (optTransport opts))
 
           -- Step 3: Install dependencies (if enabled)
-          -- In integration mode, only add runtime deps — the host project owns dev tooling.
+          -- Standalone: deps go into the generated dir (genPath) — it owns its own package.json.
+          -- Integration: deps go into the host project root (pmPath) since there's no generated package.json.
           let depsToAdd    = coDependencies out
               devDepsToAdd = if isIntegration then Map.empty else coDevDependencies out
+              depPath      = if isIntegration then pmPath else genPath
           (installResult, installMs) <- if optInstallDeps opts
             then do
-              logStep "Adding dependencies..."
               (addResult, addMs) <- timeStep $ Language.addDependencies
-                pmPath
+                depPath
                 depsToAdd
                 devDepsToAdd
                 debug
               case addResult of
-                Right () -> pure ()
-                Left _   -> pure ()
-              case addResult of
                 Left err -> pure (Left err, addMs)
-                Right () -> do
-                  logStep "Installing dependencies..."
-                  (result, ms) <- timeStep $ Language.installDependencies (cfgTarget config) pmPath debug
-                  case result of
-                    Right () -> logSuccess "Dependencies installed"
-                    Left _   -> pure ()
-                  pure (result, addMs + ms)
+                Right added -> do
+                  -- Run installDependencies if new packages were added OR node_modules is absent
+                  nodeModulesExists <- doesDirectoryExist
+                    (unGeneratedPath depPath </> "node_modules")
+                  if not added && nodeModulesExists
+                    then pure (Right (), addMs)
+                    else do
+                      when added $ logSuccess "Dependencies updated"
+                      logStep "Installing dependencies..."
+                      (result, ms) <- timeStep $ Language.installDependencies (cfgTarget config) depPath debug
+                      case result of
+                        Right () -> logSuccess "Dependencies installed"
+                        Left _   -> pure ()
+                      pure (result, addMs + ms)
             else do
               logDebug debug "Skipping dependency installation (--no-install)"
               pure (Right (), 0)
@@ -300,7 +348,7 @@ runFullPipeline config tools = do
                           ts       = T.pack $ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" pipelineEnd
                           bPath    = baselinePath cacheDir targetName backendName
 
-                      reportBenchmarks bPath backendName targetName ts steps totalMs
+                      when debug $ reportBenchmarks bPath backendName targetName ts steps totalMs
 
                       pure $ Right compiledPath
 
@@ -330,15 +378,50 @@ writeCache config tools irPath _compiledPath codegenOutput = do
   Cache.writeCodeCacheManifest (cfgOptions config) (cfgBackend config) (cfgTarget config)
     pluginCaches synapseVer hubCodegenVer
 
+  -- Write synapse.lock (project-level, committed to git)
+  irBytes <- BS.readFile (unIRPath irPath)
+  -- Use the IR's own irHash field (content-stable, no timestamps).
+  -- Fall back to hashing the raw bytes only if the field is absent.
+  let parsedIrHash = case eitherDecodeStrict irBytes of
+        Right (irData :: IRData) -> fromMaybe "" (irdIrHash irData)
+        Left _                   -> ""
+      irHash    = if T.null parsedIrHash
+                    then Merge.computeFileHash (TE.decodeUtf8 irBytes)
+                    else parsedIrHash
+      outputDir = optOutput (cfgOptions config)
+      transport = case optTransport (cfgOptions config) of
+                    WsTransport      -> "ws"
+                    BrowserTransport -> "browser"
+      Backend bkName = cfgBackend config
+      lt = Lock.LockTarget
+             { Lock.ltBackend   = bkName
+             , Lock.ltIrHash    = irHash
+             , Lock.ltTransport = transport
+             , Lock.ltFiles     = coFileHashes codegenOutput
+             }
+  lock <- fromMaybe Lock.emptySynapseLock <$> Lock.readSynapseLock
+  now  <- getCurrentTime
+  Lock.writeSynapseLock $ lock
+    { Lock.slTargets    = Map.insert (T.pack outputDir) lt (Lock.slTargets lock)
+    , Lock.slUpdatedAt  = T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now)
+    , Lock.slHubCodegen = hubCodegenVer
+    }
+
   logDebug debug "  Cache manifests written"
 
--- | Read the cached file hashes from the code cache manifest for three-way merge.
+-- | Read the cached file hashes for three-way merge.
+-- synapse.lock (project-level, committed to git) takes priority over ~/.cache.
 getCachedFileHashes :: Config -> IO (Map.Map Text Text)
 getCachedFileHashes config = do
-  result <- Cache.readCodeCacheManifest (cfgOptions config) (cfgBackend config) (cfgTarget config)
-  pure $ case result of
-    Left _         -> Map.empty
-    Right manifest -> maybe Map.empty cpcFileHashes $ Map.lookup "default" (ccmPlugins manifest)
+  let outputDir = optOutput (cfgOptions config)
+  lockResult <- Lock.readSynapseLock
+  case lockResult >>= Lock.lookupLockTarget outputDir of
+    Just lt -> pure (Lock.ltFiles lt)
+    Nothing -> do
+      result <- Cache.readCodeCacheManifest (cfgOptions config) (cfgBackend config) (cfgTarget config)
+      pure $ case result of
+        Left _         -> Map.empty
+        Right manifest -> maybe Map.empty cpcFileHashes $ Map.lookup "default" (ccmPlugins manifest)
 
 -- | Read IR plugin hashes from ir.json (now at cache path)
 readIRPluginHashes :: IRPath -> Bool -> IO (Map.Map Text IRPluginCache)
@@ -382,60 +465,162 @@ buildIRPluginCache hashMap pluginName _methods =
       }
 
 -- ============================================================================
+-- Config-file build
+-- ============================================================================
+
+-- | Run a build pass for every target in a SynapseConfig.
+-- CLI options override per-target transport/outputDir only when explicitly
+-- different from their defaults; targets own those fields.
+-- Returns one result per target (name, outcome).
+runBuildFromConfig
+  :: SynapseConfig
+  -> Options       -- ^ CLI flags (--debug, --force, --no-install, etc.)
+  -> ToolLocations
+  -> IO [(T.Text, Either SynapseCCError CompiledPath)]
+runBuildFromConfig sc opts tools =
+  mapM buildTarget (Map.toList (scTargets sc))
+  where
+    buildTarget (name, tc) = do
+      let config = buildConfigFromTarget opts sc tc
+      logInfo $ "Building \"" <> name <> "\" → " <> T.pack (optOutput (cfgOptions config))
+      logDebug (optDebug opts) $ "  target \"" <> name <> "\" is defined in synapse.config.json under .targets"
+      result <- if tcGenerate tc == ["transport"]
+                   then runTransportOnlyPipeline config tools
+                   else runPipeline config tools
+      pure (name, result)
+
+-- ============================================================================
+-- Transport-Only Pipeline (no backend connection required)
+-- ============================================================================
+
+-- | Run the transport-only pipeline.
+-- transport.ts is a static template parameterised only by --transport mode,
+-- so no backend connection or IR generation is needed.
+runTransportOnlyPipeline :: Config -> ToolLocations -> IO (Either SynapseCCError CompiledPath)
+runTransportOnlyPipeline config tools = do
+  let opts      = cfgOptions config
+      debug     = optDebug opts
+      outputDir = optOutput opts
+
+  createDirectoryIfMissing True outputDir
+
+  logStep "Generating transport layer..."
+  codeResult <- generateTransportCode config tools
+  case codeResult of
+    Left err -> pure $ Left err
+    Right out -> do
+      logSuccess "Transport generated"
+      -- Three-way merge (transport.ts is static — merge handles unchanged correctly
+      -- even without a cache entry: if content matches what's on disk, skip write).
+      cachedHashes <- if optForce opts then pure Map.empty else getCachedFileHashes config
+      mergeResult  <- Merge.applyMerge (coFiles out) (coFileHashes out) cachedHashes outputDir
+      let skipped = Merge.mrSkipped mergeResult
+      unless (null skipped) $
+        logInfo $ "  ⚠  " <> T.pack (show (length skipped))
+                <> " file(s) skipped (user modifications preserved)"
+      logDebug debug "  No backend, deps, build, or tests for transport-only target"
+      pure $ Right $ CompiledPath outputDir
+
+-- | Call hub-codegen --generate transport (no IR argument needed).
+generateTransportCode :: Config -> ToolLocations -> IO (Either SynapseCCError CodegenOutput)
+generateTransportCode config tools = do
+  let debug          = optDebug (cfgOptions config)
+      hubCodegenPath = toolPathToFilePath (toolHubCodegen tools)
+      opts           = cfgOptions config
+      targetArg      = T.unpack (targetToText (cfgTarget config))
+      args =
+        [ "--target",        targetArg
+        , "--output-format", "json"
+        , "--generate",      "transport"
+        , "--transport",     case optTransport opts of
+                               WsTransport      -> "ws"
+                               BrowserTransport -> "browser"
+        ]
+  result <- runProcess hubCodegenPath args Nothing debug
+  case prExitCode result of
+    ExitSuccess ->
+      case eitherDecodeStrict (TE.encodeUtf8 (prStdout result)) of
+        Left parseErr -> pure $ Left $ HubCodegenError (T.pack parseErr) 0
+        Right out     -> pure $ Right out
+    ExitFailure code ->
+      pure $ Left $ HubCodegenError (prStderr result) code
+
+-- ============================================================================
 -- IR Generation
 -- ============================================================================
 
--- | Generate IR using synapse
+-- | Generate IR using plexus-synapse library (replaces subprocess call)
 generateIR :: Config -> ToolLocations -> IO (Either SynapseCCError IRPath)
-generateIR config tools = do
-  let debug = optDebug (cfgOptions config)
-      synapsePath = toolPathToFilePath (toolSynapse tools)
-      Backend backendName = cfgBackend config
+generateIR config _tools = do
+  let debug  = optDebug (cfgOptions config)
+      Backend bkName = cfgBackend config
       outputDir = optOutput (cfgOptions config)
       opts = cfgOptions config
+      host = cfgHost config
+      port = read (T.unpack (cfgPort config)) :: Int
+      generatorInfo = ["synapse-cc:" <> synapseCCVersion]
 
   -- Compute IR file path in the cache directory:
   --   <cacheDir>/synapse/ir/<backend>/ir.json
   cacheDir <- getCacheDir opts
-  let irDir  = cacheDir </> "synapse" </> "ir" </> T.unpack backendName
+  let irDir  = cacheDir </> "synapse" </> "ir" </> T.unpack bkName
       irFile = irDir </> "ir.json"
 
   -- Ensure output and IR cache directories exist
   createDirectoryIfMissing True outputDir
   createDirectoryIfMissing True irDir
 
-  -- Build synapse command: synapse -H <host> -P <port> -i <backend> --generator-info synapse-cc:version
-  let host = cfgHost config
-      port = cfgPort config
-      generatorInfo = "synapse-cc:" <> synapseCCVersion
-      args = [ "-H", T.unpack host
-             , "-P", T.unpack port
-             , "--generator-info", T.unpack generatorInfo
-             , "-i"
-             , T.unpack backendName
-             ]
+  -- Call plexus-synapse library directly (no subprocess).
+  -- Pass [] as path: the backend is encoded in the env; [] = walk from root.
+  logDebug debug $ "  Connecting to " <> host <> ":" <> T.pack (show port)
+  env <- initEnv host port bkName
+  -- Wrap in try to catch hard exceptions from child-plugin fetch errors
+  rawResult <- try (runSynapseM env (buildIR generatorInfo []))
+  result <- case rawResult of
+    Left (ex :: SomeException) ->
+      let raw = T.pack (show ex)
+          msg = if "Connection refused" `T.isInfixOf` raw || "does not exist" `T.isInfixOf` raw
+                  then "Cannot connect to backend — is it running?"
+                  else T.takeWhile (/= '\n') raw
+      in pure $ Left msg
+    Right (Left synapseErr)    -> pure $ Left $ formatSynapseError synapseErr
+    Right (Right ir)           -> pure $ Right ir
 
-  -- Run synapse
-  result <- runProcess synapsePath args Nothing debug
+  case result of
+    Left msg -> do
+      logDebug debug $ "  Synapse error: " <> msg
+      pure $ Left $ SynapseError msg 1
 
-  case prExitCode result of
-    ExitSuccess -> do
-      -- Write IR to cache path
-      BS.writeFile irFile (TE.encodeUtf8 $ prStdout result)
+    Right ir -> do
+      -- Encode IR to JSON and write to cache path
+      let irBytes = BL.toStrict (Aeson.encode ir)
+      BS.writeFile irFile irBytes
 
-      -- Validate IR by trying to parse it
-      irBytes <- BS.readFile irFile
+      -- Validate by round-tripping (ensures we can parse what we wrote)
       case eitherDecodeStrict irBytes of
         Left parseErr -> pure $ Left $ InvalidIR $ T.pack parseErr
         Right (_ :: IRData) -> pure $ Right $ IRPath irFile
 
-    ExitFailure code -> do
-      pure $ Left $ SynapseError (prStderr result) code
+-- | Format a SynapseError (from plexus-synapse) for display
+formatSynapseError :: SynapseError -> Text
+formatSynapseError err = case err of
+  NavError ne ->
+    let raw = T.pack (show ne)
+    in if "Connection refused" `T.isInfixOf` raw || "does not exist" `T.isInfixOf` raw
+         then "Cannot connect to backend — is it running?"
+         else "Connection error: " <> T.takeWhile (/= '\n') raw
+  TransportError t  -> t
+  TransportErrorContext ctx ->
+    "Cannot connect to " <> T.pack (show ctx)
+  ParseError t      -> "Parse error: " <> t
+  ValidationError t -> "Validation error: " <> t
+  BackendError bt _ -> "Backend error: " <> T.pack (show bt)
 
 -- | IR structure for reading plugin hashes
 -- We only need the fields relevant for caching
 data IRData = IRData
   { irdVersion      :: !Text
+  , irdIrHash       :: !(Maybe Text)   -- ^ Content-stable hash of schema (no timestamps)
   , irdPlugins      :: !(Map.Map Text [Text])
   , irdPluginHashes :: !(Maybe (Map.Map Text PluginHashInfo))
   } deriving stock (Show, Generic)
@@ -443,6 +628,7 @@ data IRData = IRData
 instance FromJSON IRData where
   parseJSON = Aeson.withObject "IRData" $ \o -> IRData
     <$> o Aeson..: "irVersion"
+    <*> o Aeson..:? "irHash"
     <*> o Aeson..: "irPlugins"
     <*> o Aeson..:? "irPluginHashes"
 
@@ -458,25 +644,31 @@ data PluginHashInfo = PluginHashInfo
 -- Code Generation
 -- ============================================================================
 
--- | Generate code using hub-codegen, returning parsed JSON output
-generateCode :: Config -> ToolLocations -> IRPath -> IO (Either SynapseCCError CodegenOutput)
-generateCode config tools irPath = do
+-- | Generate code using hub-codegen, returning parsed JSON output.
+-- Pass @Just namespaces@ to restrict generation to specific plugin namespaces
+-- (equivalent to @--generate plugins --plugins ns1,ns2@).
+-- Pass @Nothing@ for a full generation pass.
+generateCode :: Config -> ToolLocations -> IRPath -> Maybe [Text] -> IO (Either SynapseCCError CodegenOutput)
+generateCode config tools irPath nsFilter = do
   let debug          = optDebug (cfgOptions config)
       hubCodegenPath = toolPathToFilePath (toolHubCodegen tools)
       opts           = cfgOptions config
       target         = cfgTarget config
-      targetArg      = case target of
-        TypeScript -> "typescript"
-        Python     -> "python"
-        Rust       -> "rust"
+      targetArg      = T.unpack (targetToText target)
+      backendUrl     = "ws://" <> T.unpack (cfgHost config) <> ":" <> T.unpack (cfgPort config)
+      filterArgs = case nsFilter of
+        Nothing  -> []
+        Just nss -> ["--generate", "plugins", "--plugins", T.unpack (T.intercalate "," nss)]
       args =
         [ "--target",           targetArg
         , "--output-format",    "json"
         , "--transport", case optTransport opts of
             WsTransport      -> "ws"
             BrowserTransport -> "browser"
-        , unIRPath irPath
+        , "--backend-url",      backendUrl
         ]
+        ++ filterArgs
+        ++ [ unIRPath irPath ]
 
   result <- runProcess hubCodegenPath args Nothing debug
 

@@ -5,6 +5,7 @@ module SynapseCC.Logging
   , logError
   , logDebug
   , logStep
+  , logSubStep
   ) where
 
 import Data.Text (Text)
@@ -48,11 +49,20 @@ logDebug True msg = do
   setSGR [Reset]
 logDebug False _ = pure ()
 
--- | Log a pipeline step
+-- | Log a top-level pipeline step (blank line before, bold yellow ==>)
 logStep :: Text -> IO ()
 logStep msg = do
   TIO.putStrLn ""
   setSGR [SetColor Foreground Vivid Yellow, SetConsoleIntensity BoldIntensity]
   TIO.putStr "==> "
+  TIO.putStrLn msg
+  setSGR [Reset]
+
+-- | Log a sub-step within a target build (no leading blank line, indented)
+-- Used for steps that are visually nested under a logStep target header.
+logSubStep :: Text -> IO ()
+logSubStep msg = do
+  setSGR [SetColor Foreground Vivid Yellow, SetConsoleIntensity BoldIntensity]
+  TIO.putStr "    ==> "
   TIO.putStrLn msg
   setSGR [Reset]

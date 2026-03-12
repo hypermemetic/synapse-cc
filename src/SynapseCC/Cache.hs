@@ -11,6 +11,9 @@ module SynapseCC.Cache
   , getCacheDir
   , clearCache
 
+    -- * Shared utilities
+  , expandTilde
+
     -- * V2 Validation (internal, exposed for testing)
   , validatePluginCaches
   , validatePluginCache
@@ -18,7 +21,7 @@ module SynapseCC.Cache
 
 import Control.Exception (catch, SomeException)
 import Control.Monad (when, forM_)
-import Data.Aeson (encode, eitherDecodeFileStrict)
+import Data.Aeson (FromJSON, encode, eitherDecodeFileStrict)
 import qualified Data.ByteString.Lazy as BL
 import Data.List (isPrefixOf)
 import Data.Map.Strict (Map)
@@ -77,43 +80,36 @@ getIRCacheDir opts backend = do
 getCodeCacheDir :: Options -> Backend -> Target -> IO FilePath
 getCodeCacheDir opts backend target = do
   baseDir <- getCacheDir opts
-  pure $ baseDir </> "synapse-cc" </> "code" </> targetName target </> T.unpack (backendName backend)
-  where
-    targetName TypeScript = "typescript"
-    targetName Python = "python"
-    targetName Rust = "rust"
+  pure $ baseDir </> "synapse-cc" </> "code" </> T.unpack (targetToText target) </> T.unpack (backendName backend)
 
 -- ============================================================================
 -- Cache Reading
 -- ============================================================================
 
+-- | Generic manifest reader: look for manifest.json in cacheDir and decode it.
+readManifest :: FromJSON a => FilePath -> String -> IO (Either SynapseCCError a)
+readManifest cacheDir label = do
+  let manifestPath = cacheDir </> "manifest.json"
+  exists <- doesFileExist manifestPath
+  if not exists
+    then pure $ Left $ CacheError $ T.pack label <> " manifest not found"
+    else do
+      result <- eitherDecodeFileStrict manifestPath
+      case result of
+        Left err     -> pure $ Left $ CacheError $ "Failed to parse " <> T.pack label <> " manifest: " <> T.pack err
+        Right manifest -> pure $ Right manifest
+
 -- | Read IR cache manifest
 readIRCacheManifest :: Options -> Backend -> IO (Either SynapseCCError IRCacheManifest)
 readIRCacheManifest opts backend = do
   cacheDir <- getIRCacheDir opts backend
-  let manifestPath = cacheDir </> "manifest.json"
-  exists <- doesFileExist manifestPath
-  if not exists
-    then pure $ Left $ CacheError "IR cache manifest not found"
-    else do
-      result <- eitherDecodeFileStrict manifestPath
-      case result of
-        Left err -> pure $ Left $ CacheError $ "Failed to parse IR cache manifest: " <> T.pack err
-        Right manifest -> pure $ Right manifest
+  readManifest cacheDir "IR cache"
 
 -- | Read code cache manifest
 readCodeCacheManifest :: Options -> Backend -> Target -> IO (Either SynapseCCError CodeCacheManifest)
 readCodeCacheManifest opts backend target = do
   cacheDir <- getCodeCacheDir opts backend target
-  let manifestPath = cacheDir </> "manifest.json"
-  exists <- doesFileExist manifestPath
-  if not exists
-    then pure $ Left $ CacheError "Code cache manifest not found"
-    else do
-      result <- eitherDecodeFileStrict manifestPath
-      case result of
-        Left err -> pure $ Left $ CacheError $ "Failed to parse code cache manifest: " <> T.pack err
-        Right manifest -> pure $ Right manifest
+  readManifest cacheDir "code cache"
 
 -- ============================================================================
 -- Cache Validation
@@ -183,43 +179,53 @@ validatePluginCaches :: IRCacheManifest -> CodeCacheManifest -> Bool -> IO Cache
 validatePluginCaches irManifest codeManifest debug = do
   let irPlugins = ircmPlugins irManifest
       codePlugins = ccmPlugins codeManifest
-      allPluginNames = Set.toList $ Set.union (Map.keysSet irPlugins) (Map.keysSet codePlugins)
 
-  -- Check each plugin for direct invalidation (schema/IR hash changes)
-  results <- mapM (validatePluginCache irManifest codeManifest debug) allPluginNames
-
-  -- Collect directly invalid plugins
-  let directlyInvalidPlugins = Set.fromList [name | (name, False) <- results]
-      directlyValidPlugins = [name | (name, True) <- results]
-
-  -- Build dependency graph from IR cache
-  let depGraph = Map.map ipcDependencies irPlugins
-
-  -- Find transitively invalid plugins using dependency resolution
-  let allInvalidPlugins = Dep.findInvalidPlugins directlyInvalidPlugins depGraph
-      invalidPluginsList = Set.toList allInvalidPlugins
-      validPluginsList = filter (`Set.notMember` allInvalidPlugins) directlyValidPlugins
-
-  -- Report transitive invalidation
-  when debug $ do
-    let transitivelyInvalid = Set.difference allInvalidPlugins directlyInvalidPlugins
-    when (not $ Set.null transitivelyInvalid) $ do
-      logDebug debug "Transitive invalidation due to dependencies:"
-      forM_ (Set.toList transitivelyInvalid) $ \name ->
-        logDebug debug $ "    - " <> name <> " (depends on invalid plugin)"
-
-  if null invalidPluginsList
+  -- Monolithic code cache: a single "default" entry means the last run was a
+  -- full-output pass with no per-plugin breakdown.  Tool versions already match
+  -- (checked before we get here), so treat this as a full cache hit.
+  -- Output-directory existence is verified by runPipeline's FullCacheHit handler.
+  if Map.size codePlugins == 1 && Map.member "default" codePlugins
     then do
-      logDebug debug $ "Full cache hit - all " <> T.pack (show (length validPluginsList)) <> " plugins valid"
+      logDebug debug $ "Full cache hit (" <> T.pack (show (Map.size irPlugins)) <> " plugins)"
       pure FullCacheHit
     else do
+      let allPluginNames = Set.toList $ Set.union (Map.keysSet irPlugins) (Map.keysSet codePlugins)
+
+      -- Check each plugin for direct invalidation (schema/IR hash changes)
+      results <- mapM (validatePluginCache irManifest codeManifest debug) allPluginNames
+
+      -- Collect directly invalid plugins
+      let directlyInvalidPlugins = Set.fromList [name | (name, False) <- results]
+          directlyValidPlugins = [name | (name, True) <- results]
+
+      -- Build dependency graph from IR cache
+      let depGraph = Map.map ipcDependencies irPlugins
+
+      -- Find transitively invalid plugins using dependency resolution
+      let allInvalidPlugins = Dep.findInvalidPlugins directlyInvalidPlugins depGraph
+          invalidPluginsList = Set.toList allInvalidPlugins
+          validPluginsList = filter (`Set.notMember` allInvalidPlugins) directlyValidPlugins
+
+      -- Report transitive invalidation
       when debug $ do
-        logDebug debug "Partial cache hit:"
-        logDebug debug $ "    Valid: " <> T.pack (show (length validPluginsList)) <> " plugins"
-        logDebug debug $ "    Invalid: " <> T.pack (show (length invalidPluginsList)) <> " plugins (including transitive)"
-        forM_ invalidPluginsList $ \name ->
-          logDebug debug $ "      - " <> name
-      pure $ PartialCacheHit validPluginsList invalidPluginsList
+        let transitivelyInvalid = Set.difference allInvalidPlugins directlyInvalidPlugins
+        when (not $ Set.null transitivelyInvalid) $ do
+          logDebug debug "Transitive invalidation due to dependencies:"
+          forM_ (Set.toList transitivelyInvalid) $ \name ->
+            logDebug debug $ "    - " <> name <> " (depends on invalid plugin)"
+
+      if null invalidPluginsList
+        then do
+          logDebug debug $ "Full cache hit - all " <> T.pack (show (length validPluginsList)) <> " plugins valid"
+          pure FullCacheHit
+        else do
+          when debug $ do
+            logDebug debug "Partial cache hit:"
+            logDebug debug $ "    Valid: " <> T.pack (show (length validPluginsList)) <> " plugins"
+            logDebug debug $ "    Invalid: " <> T.pack (show (length invalidPluginsList)) <> " plugins (including transitive)"
+            forM_ invalidPluginsList $ \name ->
+              logDebug debug $ "      - " <> name
+          pure $ PartialCacheHit validPluginsList invalidPluginsList
 
 -- | Validate a single plugin's cache
 -- Returns (plugin name, is valid)
@@ -352,10 +358,7 @@ writeCodeCacheManifest opts backend target plugins synapseVer hubCodegenVer = do
 
   let manifest = CodeCacheManifest
         { ccmVersion = "1.0"
-        , ccmTarget = T.pack $ case target of
-            TypeScript -> "typescript"
-            Python -> "python"
-            Rust -> "rust"
+        , ccmTarget = targetToText target
         , ccmToolchain = ToolchainVersions
             { tvSynapseCC = synapseCCVersion
             , tvSynapse = synapseVer

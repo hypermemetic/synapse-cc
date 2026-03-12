@@ -48,8 +48,8 @@ discoverTools opts = do
           synapseVer    <- getToolVersion (toolPathToFilePath synapseToolPath)
           hubCodegenVer <- getToolVersion (toolPathToFilePath hubCodegenToolPath)
 
-          logInfo $ "  synapse     " <> T.pack (toolPathToFilePath synapseToolPath) <> "  (" <> synapseVer <> ")"
-          logInfo $ "  hub-codegen " <> T.pack (toolPathToFilePath hubCodegenToolPath) <> "  (" <> hubCodegenVer <> ")"
+          logDebug debug $ "  synapse     " <> T.pack (toolPathToFilePath synapseToolPath) <> "  (" <> synapseVer <> ")"
+          logDebug debug $ "  hub-codegen " <> T.pack (toolPathToFilePath hubCodegenToolPath) <> "  (" <> hubCodegenVer <> ")"
 
           pure $ Right $ ToolLocations
             { toolSynapse           = synapseToolPath
