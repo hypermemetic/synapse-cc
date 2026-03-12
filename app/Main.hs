@@ -8,6 +8,7 @@ import System.IO (stdout, stderr, hSetEncoding, hSetBuffering, utf8, BufferMode(
 
 import SynapseCC.CLI
 import SynapseCC.Config (initSynapseConfig, loadSynapseConfig, synapseConfigPath)
+import SynapseCC.Detect (ProjectHint(..), defaultDetectors)
 import SynapseCC.Discover
 import SynapseCC.Logging
 import SynapseCC.Pipeline
@@ -33,13 +34,18 @@ main = do
     -- synapse-cc init
     -- ------------------------------------------------------------------
     CmdInit -> do
-      result <- initSynapseConfig synapseConfigPath
+      result <- initSynapseConfig synapseConfigPath defaultDetectors
       case result of
         Left err -> do
           TIO.putStrLn $ "[!] " <> err
           exitFailure
-        Right () -> do
+        Right hint -> do
           logSuccess $ "Created " <> T.pack synapseConfigPath
+          -- If a detector gave a reason, surface it so the user knows
+          -- why the generated config has a particular transport.
+          case phReason hint of
+            Just reason -> logInfo reason
+            Nothing     -> pure ()
           TIO.putStrLn "Edit it to configure your targets, then run:"
           TIO.putStrLn "  synapse-cc build"
           exitSuccess

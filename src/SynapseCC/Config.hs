@@ -21,6 +21,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import System.Directory (doesFileExist)
 
+import SynapseCC.Detect (Detector, ProjectHint(..), runDetectors)
 import SynapseCC.Types
 
 -- | Standard config file name (looked up from CWD)
@@ -104,16 +105,34 @@ buildConfigFromTarget opts sc tc =
            }
        }
 
--- | Scaffold a default synapse.config.json.
--- Returns Left if the file already exists.
-initSynapseConfig :: FilePath -> IO (Either Text ())
-initSynapseConfig path = do
+-- | Scaffold a synapse.config.json, using 'detectors' to infer the right
+-- transport and other settings for the current project.
+--
+-- Returns @Left@ if the file already exists.
+-- Returns @Right hint@ on success — the caller can inspect 'phReason' to
+-- print a message explaining what was detected.
+--
+-- Pass 'SynapseCC.Detect.defaultDetectors' for the standard set, or prepend
+-- additional detectors for project-specific overrides.
+initSynapseConfig :: FilePath -> [Detector] -> IO (Either Text ProjectHint)
+initSynapseConfig path detectors = do
   exists <- doesFileExist path
   if exists
     then pure $ Left $ T.pack path <> " already exists"
     else do
-      BL.writeFile path (Pretty.encodePretty' prettyConfig defaultSynapseConfig)
-      pure $ Right ()
+      hint <- runDetectors detectors
+      let config = applyHint hint defaultSynapseConfig
+      BL.writeFile path (Pretty.encodePretty' prettyConfig config)
+      pure $ Right hint
+
+-- | Apply detected hints to the default config.
+applyHint :: ProjectHint -> SynapseConfig -> SynapseConfig
+applyHint hint cfg =
+  case phTransport hint of
+    Nothing -> cfg
+    Just t  -> cfg
+      { scTargets = Map.map (\tc -> tc { tcTransport = t }) (scTargets cfg)
+      }
 
 -- | aeson-pretty config: 2-space indent, semantic field ordering.
 prettyConfig :: Pretty.Config

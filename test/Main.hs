@@ -703,8 +703,9 @@ main = do
           tmpExists <- doesDirectoryExist dir'
           when tmpExists $ removeDirectoryRecursive dir'
           createDirectoryIfMissing True dir'
-          result <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath
-          result `shouldBe` Right ()
+          -- Pass [] — no detectors, so defaults apply regardless of test environment
+          result <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath []
+          result `shouldSatisfy` isRight
           exists <- doesFileExist (dir' </> synapseConfigPath)
           exists `shouldBe` True
 
@@ -713,7 +714,7 @@ main = do
           let dir' = tmpBase </> "synapse-cc-init-exists-test"
           createDirectoryIfMissing True dir'
           writeFile (dir' </> synapseConfigPath) "{}"
-          result <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath
+          result <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath []
           result `shouldSatisfy` isLeft
 
         it "created file round-trips through loadSynapseConfig" $ do
@@ -722,7 +723,7 @@ main = do
           tmpExists <- doesDirectoryExist dir'
           when tmpExists $ removeDirectoryRecursive dir'
           createDirectoryIfMissing True dir'
-          _ <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath
+          _ <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath []
           result <- withCurrentDirectory dir' loadSynapseConfig
           result `shouldSatisfy` isRight
 

@@ -20,6 +20,7 @@ library
     exposed-modules:  SynapseCC.Types
                     , SynapseCC.CLI
                     , SynapseCC.Config
+                    , SynapseCC.Detect
                     , SynapseCC.Discover
                     , SynapseCC.Lock
                     , SynapseCC.Merge
