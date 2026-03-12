@@ -42,6 +42,11 @@ import qualified Plexus.Transport as Transport
 import Plexus.Types (TransportError(..), PlexusStreamItem)
 import SynapseCC.CLI (synapseCCParserInfo, synapseCCCommandParserInfo)
 import SynapseCC.Config (loadSynapseConfig, validateSynapseConfig, initSynapseConfig, synapseConfigPath)
+import SynapseCC.Detect
+  ( ProjectHint(..), Detector(..), emptyHint
+  , runDetectors, defaultDetectors
+  , detectTauri, detectVite, detectNextJS, detectNodeProject
+  )
 import SynapseCC.Discover (discoverTools)
 import SynapseCC.Pipeline (runPipeline)
 import SynapseCC.Types
@@ -1030,7 +1035,205 @@ main = do
           cfgPort cfg `shouldBe` "9000"
 
     -- ═══════════════════════════════════════════
-    -- Section 13: Standalone config-driven build
+    -- Section 13: Project detection (Detect.hs)
+    -- ═══════════════════════════════════════════
+    describe "SynapseCC.Detect" $ do
+
+      -- Helper: create a temp project dir, run action, clean up.
+      -- The action receives the dir path; withCurrentDirectory is the caller's responsibility.
+      let withTempProject :: (FilePath -> IO a) -> IO a
+          withTempProject action = do
+            tmpBase <- getTemporaryDirectory
+            let dir = tmpBase </> "synapse-detect-test"
+            exists <- doesDirectoryExist dir
+            when exists $ removeDirectoryRecursive dir
+            createDirectoryIfMissing True dir
+            action dir
+
+      describe "detectTauri" $ do
+        it "returns BrowserTransport when src-tauri/ exists" $ do
+          withTempProject $ \dir -> do
+            createDirectoryIfMissing True (dir </> "src-tauri")
+            result <- withCurrentDirectory dir (runDetector detectTauri)
+            phTransport result `shouldBe` Just BrowserTransport
+
+        it "returns BrowserTransport when tauri.conf.json exists" $ do
+          withTempProject $ \dir -> do
+            writeFile (dir </> "tauri.conf.json") "{}"
+            result <- withCurrentDirectory dir (runDetector detectTauri)
+            phTransport result `shouldBe` Just BrowserTransport
+
+        it "returns BrowserTransport when src-tauri/tauri.conf.json exists" $ do
+          withTempProject $ \dir -> do
+            createDirectoryIfMissing True (dir </> "src-tauri")
+            writeFile (dir </> "src-tauri" </> "tauri.conf.json") "{}"
+            result <- withCurrentDirectory dir (runDetector detectTauri)
+            phTransport result `shouldBe` Just BrowserTransport
+
+        it "returns emptyHint when no Tauri markers present" $ do
+          withTempProject $ \dir -> do
+            result <- withCurrentDirectory dir (runDetector detectTauri)
+            phTransport result `shouldBe` Nothing
+
+      describe "detectVite" $ do
+        it "returns BrowserTransport for vite.config.ts" $ do
+          withTempProject $ \dir -> do
+            writeFile (dir </> "vite.config.ts") "export default {}"
+            result <- withCurrentDirectory dir (runDetector detectVite)
+            phTransport result `shouldBe` Just BrowserTransport
+
+        it "returns BrowserTransport for vite.config.js" $ do
+          withTempProject $ \dir -> do
+            writeFile (dir </> "vite.config.js") "module.exports = {}"
+            result <- withCurrentDirectory dir (runDetector detectVite)
+            phTransport result `shouldBe` Just BrowserTransport
+
+        it "returns BrowserTransport for vite.config.mts" $ do
+          withTempProject $ \dir -> do
+            writeFile (dir </> "vite.config.mts") "export default {}"
+            result <- withCurrentDirectory dir (runDetector detectVite)
+            phTransport result `shouldBe` Just BrowserTransport
+
+        it "returns emptyHint when no Vite markers present" $ do
+          withTempProject $ \dir -> do
+            result <- withCurrentDirectory dir (runDetector detectVite)
+            phTransport result `shouldBe` Nothing
+
+      describe "detectNextJS" $ do
+        it "returns BrowserTransport for next.config.js" $ do
+          withTempProject $ \dir -> do
+            writeFile (dir </> "next.config.js") "module.exports = {}"
+            result <- withCurrentDirectory dir (runDetector detectNextJS)
+            phTransport result `shouldBe` Just BrowserTransport
+
+        it "returns BrowserTransport for next.config.ts" $ do
+          withTempProject $ \dir -> do
+            writeFile (dir </> "next.config.ts") "export default {}"
+            result <- withCurrentDirectory dir (runDetector detectNextJS)
+            phTransport result `shouldBe` Just BrowserTransport
+
+        it "returns emptyHint when no Next.js markers present" $ do
+          withTempProject $ \dir -> do
+            result <- withCurrentDirectory dir (runDetector detectNextJS)
+            phTransport result `shouldBe` Nothing
+
+      describe "detectNodeProject" $ do
+        it "returns WsTransport when package.json exists" $ do
+          withTempProject $ \dir -> do
+            writeFile (dir </> "package.json") "{\"name\":\"test\"}"
+            result <- withCurrentDirectory dir (runDetector detectNodeProject)
+            phTransport result `shouldBe` Just WsTransport
+
+        it "returns emptyHint when package.json is absent" $ do
+          withTempProject $ \dir -> do
+            result <- withCurrentDirectory dir (runDetector detectNodeProject)
+            phTransport result `shouldBe` Nothing
+
+      describe "runDetectors priority" $ do
+        it "Tauri beats Node (browser wins when both src-tauri/ and package.json present)" $ do
+          withTempProject $ \dir -> do
+            createDirectoryIfMissing True (dir </> "src-tauri")
+            writeFile (dir </> "package.json") "{}"
+            result <- withCurrentDirectory dir (runDetectors defaultDetectors)
+            phTransport result `shouldBe` Just BrowserTransport
+
+        it "Vite beats Node (browser wins when both vite.config.ts and package.json present)" $ do
+          withTempProject $ \dir -> do
+            writeFile (dir </> "vite.config.ts") "export default {}"
+            writeFile (dir </> "package.json") "{}"
+            result <- withCurrentDirectory dir (runDetectors defaultDetectors)
+            phTransport result `shouldBe` Just BrowserTransport
+
+        it "NextJS beats Node (browser wins when both next.config.js and package.json present)" $ do
+          withTempProject $ \dir -> do
+            writeFile (dir </> "next.config.js") "module.exports = {}"
+            writeFile (dir </> "package.json") "{}"
+            result <- withCurrentDirectory dir (runDetectors defaultDetectors)
+            phTransport result `shouldBe` Just BrowserTransport
+
+        it "bare Node project → WsTransport (fallback)" $ do
+          withTempProject $ \dir -> do
+            writeFile (dir </> "package.json") "{}"
+            result <- withCurrentDirectory dir (runDetectors defaultDetectors)
+            phTransport result `shouldBe` Just WsTransport
+
+        it "empty project → no transport opinion" $ do
+          withTempProject $ \dir -> do
+            result <- withCurrentDirectory dir (runDetectors defaultDetectors)
+            phTransport result `shouldBe` Nothing
+
+        it "custom detector prepended overrides defaultDetectors" $ do
+          withTempProject $ \dir -> do
+            -- Custom detector that always says WsTransport, even in a Tauri project
+            let myDetector = Detector "custom" (pure emptyHint { phTransport = Just WsTransport })
+            createDirectoryIfMissing True (dir </> "src-tauri")
+            result <- withCurrentDirectory dir (runDetectors (myDetector : defaultDetectors))
+            phTransport result `shouldBe` Just WsTransport
+
+      describe "initSynapseConfig with detectors" $ do
+        it "Tauri project → generated config has browser transport" $ do
+          withTempProject $ \dir -> do
+            createDirectoryIfMissing True (dir </> "src-tauri")
+            hint <- withCurrentDirectory dir $
+              initSynapseConfig synapseConfigPath defaultDetectors
+            hint `shouldSatisfy` isRight
+            cfgResult <- withCurrentDirectory dir loadSynapseConfig
+            case cfgResult of
+              Left err -> expectationFailure $ "loadSynapseConfig failed: " <> T.unpack err
+              Right sc -> do
+                let transports = map tcTransport (Map.elems (scTargets sc))
+                transports `shouldSatisfy` all (== BrowserTransport)
+
+        it "Vite project → generated config has browser transport" $ do
+          withTempProject $ \dir -> do
+            writeFile (dir </> "vite.config.ts") "export default {}"
+            hint <- withCurrentDirectory dir $
+              initSynapseConfig synapseConfigPath defaultDetectors
+            hint `shouldSatisfy` isRight
+            cfgResult <- withCurrentDirectory dir loadSynapseConfig
+            case cfgResult of
+              Left err -> expectationFailure $ "loadSynapseConfig failed: " <> T.unpack err
+              Right sc -> do
+                let transports = map tcTransport (Map.elems (scTargets sc))
+                transports `shouldSatisfy` all (== BrowserTransport)
+
+        it "Node project → generated config has ws transport" $ do
+          withTempProject $ \dir -> do
+            writeFile (dir </> "package.json") "{}"
+            hint <- withCurrentDirectory dir $
+              initSynapseConfig synapseConfigPath defaultDetectors
+            hint `shouldSatisfy` isRight
+            cfgResult <- withCurrentDirectory dir loadSynapseConfig
+            case cfgResult of
+              Left err -> expectationFailure $ "loadSynapseConfig failed: " <> T.unpack err
+              Right sc -> do
+                let transports = map tcTransport (Map.elems (scTargets sc))
+                transports `shouldSatisfy` all (== WsTransport)
+
+        it "empty project → generated config has ws transport (default)" $ do
+          withTempProject $ \dir -> do
+            hint <- withCurrentDirectory dir $
+              initSynapseConfig synapseConfigPath defaultDetectors
+            hint `shouldSatisfy` isRight
+            cfgResult <- withCurrentDirectory dir loadSynapseConfig
+            case cfgResult of
+              Left err -> expectationFailure $ "loadSynapseConfig failed: " <> T.unpack err
+              Right sc -> do
+                -- No detector fired → no hint → default transport (WsTransport from defaultSynapseConfig)
+                let transports = map tcTransport (Map.elems (scTargets sc))
+                transports `shouldSatisfy` (not . null)
+
+        it "hint reason is included in successful result" $ do
+          withTempProject $ \dir -> do
+            createDirectoryIfMissing True (dir </> "src-tauri")
+            result <- withCurrentDirectory dir $
+              initSynapseConfig synapseConfigPath defaultDetectors
+            case result of
+              Left err -> expectationFailure $ "Expected Right but got Left: " <> T.unpack err
+              Right hint -> phReason hint `shouldSatisfy` isJust
+
+    -- ═══════════════════════════════════════════
+    -- Section 14: Standalone config-driven build
     -- ═══════════════════════════════════════════
     describe "Standalone config-driven build" $ do
 
