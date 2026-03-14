@@ -6,6 +6,7 @@ module SynapseCC.Merge
   ( computeFileHash
   , applyMerge
   , cleanRemovedFiles
+  , additiveMerge
   , MergeResult(..)
   ) where
 
@@ -14,6 +15,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as Base16
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -35,6 +37,7 @@ data FileStatus
   | SafeToUpdate
   | Unchanged
   | UserModified
+  | SmartMerged
   deriving (Show, Eq)
 
 -- | Three-way merge decision table:
@@ -60,11 +63,13 @@ determineStatus (Just cached) (Just curr) new
 
 -- | Result of applying a merge
 data MergeResult = MergeResult
-  { mrNew       :: [Text]  -- ^ New files written
-  , mrUpdated   :: [Text]  -- ^ Existing files safely updated
-  , mrUnchanged :: [Text]  -- ^ Files unchanged (write skipped)
-  , mrSkipped   :: [Text]  -- ^ Files skipped due to user modifications
-  , mrDeleted   :: [Text]  -- ^ Stale generated files removed
+  { mrNew          :: [Text]      -- ^ New files written
+  , mrUpdated      :: [Text]      -- ^ Existing files safely updated
+  , mrUnchanged    :: [Text]      -- ^ Files unchanged (write skipped)
+  , mrSkipped      :: [Text]      -- ^ Files skipped due to user modifications
+  , mrDeleted      :: [Text]      -- ^ Stale generated files removed
+  , mrMerged       :: [Text]      -- ^ Files smart-merged (new content added, user mods preserved)
+  , mrMergedHashes :: Map Text Text  -- ^ relPath -> merged hash for smart-merged files
   } deriving (Show, Eq)
 
 -- | Apply three-way merge: write generated files to disk, skipping user-modified ones.
@@ -78,7 +83,7 @@ applyMerge generatedFiles _generatedHashes cachedHashes outputDir = do
   results <- mapM processFile (Map.toList generatedFiles)
   pure $ foldr addResult emptyResult results
   where
-    emptyResult = MergeResult [] [] [] [] []
+    emptyResult = MergeResult [] [] [] [] [] [] Map.empty
 
     processFile (relPath, content) = do
       let fullPath   = outputDir </> T.unpack relPath
@@ -87,10 +92,19 @@ applyMerge generatedFiles _generatedHashes cachedHashes outputDir = do
       currentHash <- readCurrentHash fullPath
       let status = determineStatus cachedHash currentHash newHash
       case status of
-        NewFile      -> writeFile' fullPath content >> pure (relPath, NewFile)
-        SafeToUpdate -> writeFile' fullPath content >> pure (relPath, SafeToUpdate)
-        Unchanged    -> pure (relPath, Unchanged)
-        UserModified -> pure (relPath, UserModified)
+        NewFile      -> writeFile' fullPath content >> pure (relPath, NewFile, Nothing)
+        SafeToUpdate -> writeFile' fullPath content >> pure (relPath, SafeToUpdate, Nothing)
+        Unchanged    -> pure (relPath, Unchanged, Nothing)
+        SmartMerged  -> pure (relPath, SmartMerged, Nothing)  -- not reached from determineStatus
+        UserModified -> do
+          currentBytes <- BS.readFile fullPath
+          let currentContent = TE.decodeUtf8With TEE.lenientDecode currentBytes
+          case additiveMerge content currentContent of
+            Just merged -> do
+              writeFile' fullPath merged
+              let mergedHash = computeFileHash merged
+              pure (relPath, SmartMerged, Just mergedHash)
+            Nothing -> pure (relPath, UserModified, Nothing)
 
     readCurrentHash path = do
       exists <- doesFileExist path
@@ -104,10 +118,77 @@ applyMerge generatedFiles _generatedHashes cachedHashes outputDir = do
       createDirectoryIfMissing True (takeDirectory path)
       BS.writeFile path (TE.encodeUtf8 content)
 
-    addResult (p, NewFile)      mr = mr { mrNew       = p : mrNew       mr }
-    addResult (p, SafeToUpdate) mr = mr { mrUpdated   = p : mrUpdated   mr }
-    addResult (p, Unchanged)    mr = mr { mrUnchanged = p : mrUnchanged mr }
-    addResult (p, UserModified) mr = mr { mrSkipped   = p : mrSkipped   mr }
+    addResult (p, NewFile, _)      mr = mr { mrNew       = p : mrNew       mr }
+    addResult (p, SafeToUpdate, _) mr = mr { mrUpdated   = p : mrUpdated   mr }
+    addResult (p, Unchanged, _)    mr = mr { mrUnchanged = p : mrUnchanged mr }
+    addResult (p, UserModified, _) mr = mr { mrSkipped   = p : mrSkipped   mr }
+    addResult (p, SmartMerged, mh) mr = mr
+      { mrMerged       = p : mrMerged mr
+      , mrMergedHashes = case mh of
+          Just h  -> Map.insert p h (mrMergedHashes mr)
+          Nothing -> mrMergedHashes mr
+      }
+
+-- | Additive merge: insert novel lines from new content into user-modified current content.
+-- Returns Nothing if files are too divergent (<50% shared lines) or an anchor can't be found.
+additiveMerge :: Text -> Text -> Maybe Text
+additiveMerge newContent currentContent
+  | newLines == currentLines = Just currentContent  -- identical, no-op
+  | sharedRatio < 0.5       = Nothing               -- too divergent
+  | null insertionBlocks    = Just currentContent    -- no novel lines
+  | otherwise               = applyInsertions currentLines insertionBlocks
+  where
+    newLines     = T.lines newContent
+    currentLines = T.lines currentContent
+    currentSet   = Set.fromList currentLines
+
+    -- Count how many new lines exist in current
+    sharedCount  = length $ filter (`Set.member` currentSet) newLines
+    sharedRatio  = fromIntegral sharedCount / max 1 (fromIntegral (length newLines)) :: Double
+
+    -- Walk newLines, grouping consecutive novel lines with their anchor
+    -- An anchor is the last shared line before a block of novel lines
+    insertionBlocks = extractBlocks Nothing [] [] newLines
+
+    -- Extract insertion blocks: (Maybe anchor, [novel lines])
+    extractBlocks :: Maybe Text -> [(Maybe Text, [Text])] -> [Text] -> [Text] -> [(Maybe Text, [Text])]
+    extractBlocks _anchor acc novelAcc [] =
+      if null novelAcc then reverse acc
+      else reverse ((Nothing, reverse novelAcc) : acc)  -- trailing novel lines get no anchor
+    extractBlocks anchor acc novelAcc (l:ls)
+      | l `Set.member` currentSet =
+          let acc' = if null novelAcc then acc
+                     else (anchor, reverse novelAcc) : acc
+          in extractBlocks (Just l) acc' [] ls
+      | otherwise =
+          extractBlocks anchor acc (l : novelAcc) ls
+
+    -- Apply insertion blocks into currentLines
+    applyInsertions :: [Text] -> [(Maybe Text, [Text])] -> Maybe Text
+    applyInsertions curr blocks = go curr blocks 0
+      where
+        go :: [Text] -> [(Maybe Text, [Text])] -> Int -> Maybe Text
+        go remaining [] _ = Just $ T.unlines (remaining)
+        go remaining ((Nothing, novel):rest) pos =
+          -- No anchor: prepend to result (novel lines before any shared line)
+          go (novel ++ remaining) rest pos
+        go remaining ((Just anchor, novel):rest) pos =
+          -- Find anchor in remaining lines (forward scan)
+          case findAnchor anchor remaining of
+            Nothing -> Nothing  -- can't find anchor, bail
+            Just idx ->
+              let (before, afterAnchor) = splitAt (idx + 1) remaining
+                  remaining' = before ++ novel ++ afterAnchor
+                  newPos = pos + idx + 1 + length novel
+              in go remaining' rest newPos
+
+    -- Find first occurrence of anchor line in a list
+    findAnchor :: Text -> [Text] -> Maybe Int
+    findAnchor _anchor [] = Nothing
+    findAnchor anchor ls  = go' 0 ls
+      where
+        go' _ []     = Nothing
+        go' i (x:xs) = if x == anchor then Just i else go' (i + 1) xs
 
 -- | Delete stale generated files: those present in the previous generation's
 -- cached hashes but absent from the new generation.

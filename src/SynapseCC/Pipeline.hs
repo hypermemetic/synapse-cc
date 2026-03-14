@@ -243,6 +243,14 @@ runFullPipeline config tools = do
           irContent <- BS.readFile (unIRPath irPath)
           BS.writeFile (outputDir </> "ir.json") irContent
 
+          -- Log smart-merged files (new content added, user modifications preserved)
+          let merged = Merge.mrMerged mergeResult
+          unless (null merged) $ do
+            logInfo $ "  ✓ " <> T.pack (show (length merged))
+                    <> " file(s) smart-merged (new content added, user modifications preserved)"
+            when debug $ forM_ merged $ \f ->
+              logDebug debug $ "      - " <> f
+
           -- Log skipped files (user modifications preserved)
           let skipped = Merge.mrSkipped mergeResult
           unless (null skipped) $ do
@@ -333,7 +341,11 @@ runFullPipeline config tools = do
                   case testResult of
                     Left err -> pure $ Left err
                     Right () -> do
-                      writeCache config tools irPath compiledPath out
+                      -- Patch file hashes: replace hashes for smart-merged files
+                      -- with their merged hashes so subsequent runs see them as SafeToUpdate
+                      let patchedHashes = Map.union (Merge.mrMergedHashes mergeResult) (coFileHashes out)
+                          patchedOut = out { coFileHashes = patchedHashes }
+                      writeCache config tools irPath compiledPath patchedOut
 
                       -- Benchmarks
                       pipelineEnd <- getCurrentTime

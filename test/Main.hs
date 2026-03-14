@@ -48,6 +48,7 @@ import SynapseCC.Detect
   , detectTauri, detectVite, detectNextJS, detectNodeProject
   )
 import SynapseCC.Discover (discoverTools)
+import SynapseCC.Merge (additiveMerge)
 import SynapseCC.Pipeline (runPipeline)
 import SynapseCC.Types
   ( Config(..), Backend(..), Target(..), Options(..), defaultOptions, formatError
@@ -695,6 +696,71 @@ main = do
 
         after <- TIO.readFile target
         after `shouldNotBe` userEdit
+
+      it "user edit survives rerun AND new methods appear via smart merge" $ do
+        -- If the backend has new methods, additiveMerge should insert them
+        -- while preserving user modifications.
+        let target = dir </> "rpc.ts"
+        original <- TIO.readFile target
+        -- Add a user comment somewhere in the file
+        let userEdit = T.replace "// Generated" "// Generated\n// user custom line" original
+            fallback = original <> "\n// user custom line"
+            edited   = if userEdit /= original then userEdit else fallback
+        TIO.writeFile target edited
+
+        _ <- runAgain []
+
+        after <- TIO.readFile target
+        -- User modification must survive
+        T.isInfixOf "// user custom line" after `shouldBe` True
+
+    -- ═══════════════════════════════════════════
+    -- Section 9b: additiveMerge unit tests
+    -- ═══════════════════════════════════════════
+    describe "additiveMerge" $ do
+
+      it "inserts a novel block after its anchor" $ do
+        let current = T.unlines ["line1", "line2", "line3"]
+            new     = T.unlines ["line1", "line2", "new_a", "new_b", "line3"]
+        case additiveMerge new current of
+          Nothing     -> expectationFailure "Expected Just, got Nothing"
+          Just merged -> do
+            T.isInfixOf "new_a" merged `shouldBe` True
+            T.isInfixOf "new_b" merged `shouldBe` True
+            T.isInfixOf "line2" merged `shouldBe` True
+            T.isInfixOf "line3" merged `shouldBe` True
+
+      it "handles multiple insertion blocks at different positions" $ do
+        let current = T.unlines ["a", "b", "c", "d"]
+            new     = T.unlines ["a", "x1", "b", "c", "x2", "d"]
+        case additiveMerge new current of
+          Nothing     -> expectationFailure "Expected Just, got Nothing"
+          Just merged -> do
+            T.isInfixOf "x1" merged `shouldBe` True
+            T.isInfixOf "x2" merged `shouldBe` True
+
+      it "handles novel lines at the beginning (before any shared line)" $ do
+        let current = T.unlines ["shared1", "shared2"]
+            new     = T.unlines ["brand_new", "shared1", "shared2"]
+        case additiveMerge new current of
+          Nothing     -> expectationFailure "Expected Just, got Nothing"
+          Just merged -> T.isInfixOf "brand_new" merged `shouldBe` True
+
+      it "returns current unchanged when no novel lines exist" $ do
+        let content = T.unlines ["a", "b", "c"]
+        additiveMerge content content `shouldBe` Just content
+
+      it "returns Nothing when files are too divergent" $ do
+        let current = T.unlines ["x", "y", "z"]
+            new     = T.unlines ["a", "b", "c", "d", "e"]
+        additiveMerge new current `shouldBe` Nothing
+
+      it "handles duplicate anchor lines via forward scanning" $ do
+        let current = T.unlines ["}", "code_a", "}", "code_b", "}"]
+            new     = T.unlines ["}", "code_a", "}", "inserted", "code_b", "}"]
+        case additiveMerge new current of
+          Nothing     -> expectationFailure "Expected Just, got Nothing"
+          Just merged -> T.isInfixOf "inserted" merged `shouldBe` True
 
     -- ═══════════════════════════════════════════
     -- Section 10: synapse.config.json
