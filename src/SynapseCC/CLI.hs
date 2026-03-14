@@ -42,6 +42,7 @@ configParser = Config
   <*> hostParser
   <*> portParser
   <*> optionsParser
+  <*> pure Nothing
 
 -- ============================================================================
 -- Command Parser (with subcommands: build, watch, init)
@@ -77,7 +78,7 @@ buildCommandParser = mkCmd
   <*> portParser
   <*> optionsParser
   where
-    mkCmd (Just t) (Just b) host port opts = CmdBuild (Config t b host port opts)
+    mkCmd (Just t) (Just b) host port opts = CmdBuild (Config t b host port opts Nothing)
     mkCmd _        _        _    _    opts = CmdBuildFromConfig opts
 
 watchCommandParser :: Parser Command

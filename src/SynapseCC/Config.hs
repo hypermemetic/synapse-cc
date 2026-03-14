@@ -55,12 +55,16 @@ validateSynapseConfig cfg = do
   requireNonEmpty "language" (scLanguage cfg)
   -- backend and url are required only when at least one target needs a backend.
   -- A target with generate: ["transport"] is backend-free.
-  let needsBackend = any ((/= ["transport"]) . tcGenerate) (Map.elems (scTargets cfg))
-  if needsBackend
-    then case scBackend cfg of
-           Nothing -> Left "\"backend\" is required when targets need a backend connection"
-           Just b  -> requireNonEmpty "backend" b
-    else Right ()
+  -- Each non-transport-only target needs a backend from either its own fields or top-level
+  let targetsNeedingBackend = filter ((/= ["transport"]) . tcGenerate . snd) (Map.toList (scTargets cfg))
+      missingBackend = filter (\(_, tc) ->
+        case (tcBackend tc, scBackend cfg) of
+          (Nothing, Nothing) -> True
+          _                  -> False
+        ) targetsNeedingBackend
+  case missingBackend of
+    ((name, _):_) -> Left $ "target \"" <> name <> "\": no \"backend\" specified (set per-target or top-level)"
+    []            -> Right ()
   if Map.null (scTargets cfg)
     then Left "At least one entry under \"targets\" is required"
     else mapM_ (validateTargetConfig (scTargets cfg)) (Map.toList (scTargets cfg))
@@ -101,9 +105,9 @@ parseWsUrl url =
 -- (--debug, --force, --no-install, etc.) are inherited as-is.
 buildConfigFromTarget :: Options -> SynapseConfig -> TargetConfig -> Config
 buildConfigFromTarget opts sc tc =
-  let url            = fromMaybe "ws://127.0.0.1:4444" (scUrl sc)
+  let url            = fromMaybe (fromMaybe "ws://127.0.0.1:4444" (scUrl sc)) (tcUrl tc)
       (host, port)   = parseWsUrl url
-      backendName    = fromMaybe "" (scBackend sc)
+      backendName    = fromMaybe (fromMaybe "" (scBackend sc)) (tcBackend tc)
   in Config
        { cfgTarget  = parseLanguage (scLanguage sc)
        , cfgBackend = Backend backendName
@@ -113,6 +117,7 @@ buildConfigFromTarget opts sc tc =
            { optOutput    = tcOutputDir tc
            , optTransport = tcTransport tc
            }
+       , cfgPlugins = tcPlugins tc
        }
 
 -- | Scaffold a synapse.config.json, using 'detectors' to infer the right

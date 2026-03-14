@@ -656,9 +656,14 @@ generateCode config tools irPath nsFilter = do
       target         = cfgTarget config
       targetArg      = T.unpack (targetToText target)
       backendUrl     = "ws://" <> T.unpack (cfgHost config) <> ":" <> T.unpack (cfgPort config)
+      -- nsFilter: incremental mode (--generate plugins --plugins ...)
       filterArgs = case nsFilter of
         Nothing  -> []
         Just nss -> ["--generate", "plugins", "--plugins", T.unpack (T.intercalate "," nss)]
+      -- cfgPlugins: full generation with plugin filtering (--plugins ... only, no --generate plugins)
+      pluginFilterArgs = case cfgPlugins config of
+        Just ps | null filterArgs -> ["--plugins", T.unpack (T.intercalate "," ps)]
+        _                         -> []
       args =
         [ "--target",           targetArg
         , "--output-format",    "json"
@@ -668,6 +673,7 @@ generateCode config tools irPath nsFilter = do
         , "--backend-url",      backendUrl
         ]
         ++ filterArgs
+        ++ pluginFilterArgs
         ++ [ unIRPath irPath ]
 
   result <- runProcess hubCodegenPath args Nothing debug

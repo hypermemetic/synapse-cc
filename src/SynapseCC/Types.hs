@@ -87,6 +87,7 @@ data Config = Config
   , cfgHost           :: !Text
   , cfgPort           :: !Text
   , cfgOptions        :: !Options
+  , cfgPlugins        :: !(Maybe [Text])  -- ^ Plugin filter (Nothing = all)
   } deriving stock (Show, Eq, Generic)
 
 -- | Target language for code generation
@@ -183,6 +184,9 @@ data TargetConfig = TargetConfig
   , tcTransport  :: !TransportType    -- ^ Transport for this target
   , tcOutputDir  :: !FilePath         -- ^ Where to write generated files
   , tcSmokePath  :: !(Maybe Text)     -- ^ Relative path to transport for smoke targets
+  , tcBackend    :: !(Maybe Text)     -- ^ Per-target backend override
+  , tcUrl        :: !(Maybe Text)     -- ^ Per-target WebSocket URL override
+  , tcPlugins    :: !(Maybe [Text])   -- ^ Plugin filter (Nothing = all)
   } deriving stock (Show, Eq, Generic)
 
 instance FromJSON TargetConfig where
@@ -191,6 +195,9 @@ instance FromJSON TargetConfig where
     <*> (parseTransport =<< o Aeson..: "transport")
     <*> o Aeson..: "outputDir"
     <*> o Aeson..:? "smokePath"
+    <*> o Aeson..:? "backend"
+    <*> o Aeson..:? "url"
+    <*> o Aeson..:? "plugins"
     where
       parseTransport :: Text -> Parser TransportType
       parseTransport "ws"      = pure WsTransport
@@ -205,6 +212,15 @@ instance ToJSON TargetConfig where
     ] ++ case tcSmokePath tc of
            Nothing -> []
            Just p  -> ["smokePath" Aeson..= p]
+      ++ case tcBackend tc of
+           Nothing -> []
+           Just b  -> ["backend" Aeson..= b]
+      ++ case tcUrl tc of
+           Nothing -> []
+           Just u  -> ["url" Aeson..= u]
+      ++ case tcPlugins tc of
+           Nothing -> []
+           Just ps -> ["plugins" Aeson..= ps]
 
 -- | Top-level synapse.config.json configuration.
 -- \"backend\" and \"url\" are optional when every target has generate: [\"transport\"]
@@ -255,6 +271,9 @@ defaultSynapseConfig = SynapseConfig
             , tcTransport = WsTransport
             , tcOutputDir = "src/lib/plexus"
             , tcSmokePath = Nothing
+            , tcBackend   = Nothing
+            , tcUrl       = Nothing
+            , tcPlugins   = Nothing
             }
         )
       ]
