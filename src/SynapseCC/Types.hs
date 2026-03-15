@@ -26,6 +26,7 @@ module SynapseCC.Types
     -- * Commands (CLI subcommands)
   , Command(..)
   , WatchArgs(..)
+  , WaitArgs(..)
 
     -- * Tool Locations
   , ToolLocations(..)
@@ -180,13 +181,14 @@ defaultWatchConfig = WatchConfig
 
 -- | Per-target configuration entry in synapse.config.json
 data TargetConfig = TargetConfig
-  { tcGenerate   :: ![Text]           -- ^ Selectors: ["transport","rpc","plugins"] or ["all"]
-  , tcTransport  :: !TransportType    -- ^ Transport for this target
-  , tcOutputDir  :: !FilePath         -- ^ Where to write generated files
-  , tcSmokePath  :: !(Maybe Text)     -- ^ Relative path to transport for smoke targets
-  , tcBackend    :: !(Maybe Text)     -- ^ Per-target backend override
-  , tcUrl        :: !(Maybe Text)     -- ^ Per-target WebSocket URL override
-  , tcPlugins    :: !(Maybe [Text])   -- ^ Plugin filter (Nothing = all)
+  { tcGenerate        :: ![Text]           -- ^ Selectors: ["transport","rpc","plugins"] or ["all"]
+  , tcTransport       :: !TransportType    -- ^ Transport for this target
+  , tcOutputDir       :: !FilePath         -- ^ Where to write generated files
+  , tcSmokePath       :: !(Maybe Text)     -- ^ Relative path to transport for smoke targets
+  , tcBackend         :: !(Maybe Text)     -- ^ Per-target backend override
+  , tcUrl             :: !(Maybe Text)     -- ^ Per-target WebSocket URL override
+  , tcPlugins         :: !(Maybe [Text])   -- ^ Plugin filter (Nothing = all)
+  , tcSharedTransport :: !(Maybe Text)     -- ^ Name of another target whose transport to reuse
   } deriving stock (Show, Eq, Generic)
 
 instance FromJSON TargetConfig where
@@ -198,6 +200,7 @@ instance FromJSON TargetConfig where
     <*> o Aeson..:? "backend"
     <*> o Aeson..:? "url"
     <*> o Aeson..:? "plugins"
+    <*> o Aeson..:? "sharedTransport"
     where
       parseTransport :: Text -> Parser TransportType
       parseTransport "ws"      = pure WsTransport
@@ -221,6 +224,9 @@ instance ToJSON TargetConfig where
       ++ case tcPlugins tc of
            Nothing -> []
            Just ps -> ["plugins" Aeson..= ps]
+      ++ case tcSharedTransport tc of
+           Nothing -> []
+           Just st -> ["sharedTransport" Aeson..= st]
 
 -- | Top-level synapse.config.json configuration.
 -- \"backend\" and \"url\" are optional when every target has generate: [\"transport\"]
@@ -267,13 +273,14 @@ defaultSynapseConfig = SynapseConfig
   , scTargets        = Map.fromList
       [ ( "client"
         , TargetConfig
-            { tcGenerate  = ["transport", "rpc", "plugins"]
-            , tcTransport = WsTransport
-            , tcOutputDir = "src/lib/plexus"
-            , tcSmokePath = Nothing
-            , tcBackend   = Nothing
-            , tcUrl       = Nothing
-            , tcPlugins   = Nothing
+            { tcGenerate        = ["transport", "rpc", "plugins"]
+            , tcTransport       = WsTransport
+            , tcOutputDir       = "src/lib/plexus"
+            , tcSmokePath       = Nothing
+            , tcBackend         = Nothing
+            , tcUrl             = Nothing
+            , tcPlugins         = Nothing
+            , tcSharedTransport = Nothing
             }
         )
       ]
@@ -289,6 +296,7 @@ data Command
   | CmdBuildFromConfig      -- ^ Build all targets from synapse.config.json
       Options               -- ^ CLI flags that override per-target config
   | CmdWatch WatchArgs      -- ^ Watch mode
+  | CmdWait WaitArgs        -- ^ Wait for backends to become reachable
   | CmdInit                 -- ^ Scaffold synapse.config.json
   deriving stock (Show, Eq)
 
@@ -299,6 +307,15 @@ data WatchArgs = WatchArgs
   , waTarget    :: !(Maybe Text) -- ^ Pin to a single named config target
   , waInterval  :: !(Maybe Int)  -- ^ Poll interval override in ms (overrides config)
   , waOptions   :: !Options      -- ^ Inherited options (host, port, cache, debug, etc.)
+  } deriving stock (Show, Eq)
+
+-- | Arguments for the wait subcommand
+data WaitArgs = WaitArgs
+  { waitBackend  :: !(Maybe Text)  -- ^ Specific backend (if None, use all from config)
+  , waitUrl      :: !(Maybe Text)  -- ^ Explicit URL (requires backend)
+  , waitTimeout  :: !Int           -- ^ Max seconds to wait (default 30)
+  , waitInterval :: !Int           -- ^ Poll interval in ms (default 500)
+  , waitDebug    :: !Bool          -- ^ Debug logging
   } deriving stock (Show, Eq)
 
 -- ============================================================================

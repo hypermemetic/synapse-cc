@@ -13,6 +13,7 @@ import SynapseCC.Discover
 import SynapseCC.Logging
 import SynapseCC.Pipeline
 import SynapseCC.Types
+import SynapseCC.Wait (runWait)
 import SynapseCC.Watch (runWatch)
 
 -- ============================================================================
@@ -120,6 +121,13 @@ main = do
               if all (either (const False) (const True) . snd) results
                 then exitSuccess
                 else exitFailure
+
+    -- ------------------------------------------------------------------
+    -- synapse-cc wait [--timeout N] [--interval MS]
+    -- ------------------------------------------------------------------
+    CmdWait waitArgs -> do
+      ok <- runWait waitArgs
+      if ok then exitSuccess else exitFailure
 
     -- ------------------------------------------------------------------
     -- synapse-cc watch <backend> [plugins...] [--target name]

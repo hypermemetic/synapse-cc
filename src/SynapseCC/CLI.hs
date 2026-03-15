@@ -66,6 +66,8 @@ commandParser = subparser
       (progDesc "Build client from backend schema (default)"))
  <> command "watch" (info watchCommandParser
       (progDesc "Watch backend for changes and incrementally rebuild"))
+ <> command "wait"  (info waitCommandParser
+      (progDesc "Block until all configured backends are reachable"))
  <> command "init"  (info initCommandParser
       (progDesc "Scaffold a synapse.config.json in the current directory"))
   )
@@ -104,6 +106,36 @@ watchCommandParser = fmap CmdWatch $ WatchArgs
        <> help "Poll interval in milliseconds (overrides synapse.config.json)"
         ))
   <*> watchOptionsParser
+
+waitCommandParser :: Parser Command
+waitCommandParser = fmap CmdWait $ WaitArgs
+  <$> optional (T.pack <$> argument str
+        ( metavar "BACKEND"
+       <> help "Backend to wait for (omit to wait for all from config)"
+        ))
+  <*> optional (T.pack <$> option str
+        ( long "url"
+       <> short 'u'
+       <> metavar "URL"
+       <> help "WebSocket URL (e.g. ws://127.0.0.1:4448). Requires BACKEND arg."
+        ))
+  <*> option auto
+        ( long "timeout"
+       <> short 't'
+       <> metavar "SECONDS"
+       <> value 30
+       <> showDefault
+       <> help "Max seconds to wait before giving up"
+        )
+  <*> option auto
+        ( long "interval"
+       <> short 'i'
+       <> metavar "MS"
+       <> value 500
+       <> showDefault
+       <> help "Poll interval in milliseconds"
+        )
+  <*> switch (long "debug" <> help "Enable debug logging")
 
 initCommandParser :: Parser Command
 initCommandParser = pure CmdInit
