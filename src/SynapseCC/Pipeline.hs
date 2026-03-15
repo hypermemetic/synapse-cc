@@ -8,7 +8,7 @@ module SynapseCC.Pipeline
   ) where
 
 import Control.Exception (try, SomeException)
-import Control.Monad (when, unless, forM_)
+import Control.Monad (when, unless, forM_, forM)
 import Data.Aeson (FromJSON, eitherDecodeStrict, eitherDecodeFileStrict)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
@@ -24,7 +24,7 @@ import Data.Time.Format (formatTime, defaultTimeLocale)
 import GHC.Generics (Generic)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getCurrentDirectory, listDirectory)
 import System.Exit (ExitCode(..))
-import System.FilePath ((</>))
+import System.FilePath ((</>), splitPath)
 
 import Synapse.Monad (initEnv, runSynapseM, SynapseError(..))
 import Synapse.IR.Builder (buildIR)
@@ -406,10 +406,11 @@ writeCache config tools irPath _compiledPath codegenOutput = do
                     BrowserTransport -> "browser"
       Backend bkName = cfgBackend config
       lt = Lock.LockTarget
-             { Lock.ltBackend   = bkName
-             , Lock.ltIrHash    = irHash
-             , Lock.ltTransport = transport
-             , Lock.ltFiles     = coFileHashes codegenOutput
+             { Lock.ltBackend         = bkName
+             , Lock.ltIrHash          = irHash
+             , Lock.ltTransport       = transport
+             , Lock.ltFiles           = coFileHashes codegenOutput
+             , Lock.ltSharedTransport = Nothing
              }
   lock <- fromMaybe Lock.emptySynapseLock <$> Lock.readSynapseLock
   now  <- getCurrentTime
@@ -483,14 +484,63 @@ buildIRPluginCache hashMap pluginName _methods =
 -- | Run a build pass for every target in a SynapseConfig.
 -- CLI options override per-target transport/outputDir only when explicitly
 -- different from their defaults; targets own those fields.
+-- Providers (no sharedTransport) are built first, then consumers (with sharedTransport)
+-- get shim files that re-export from the provider's output.
 -- Returns one result per target (name, outcome).
 runBuildFromConfig
   :: SynapseConfig
   -> Options       -- ^ CLI flags (--debug, --force, --no-install, etc.)
   -> ToolLocations
   -> IO [(T.Text, Either SynapseCCError CompiledPath)]
-runBuildFromConfig sc opts tools =
-  mapM buildTarget (Map.toList (scTargets sc))
+runBuildFromConfig sc opts tools = do
+  let allTargets  = Map.toList (scTargets sc)
+      -- Partition: providers first (no sharedTransport), then consumers
+      (providers, consumers) = foldr partitionTarget ([], []) allTargets
+      partitionTarget (name, tc) (ps, cs) =
+        case tcSharedTransport tc of
+          Nothing -> ((name, tc) : ps, cs)
+          Just _  -> (ps, (name, tc) : cs)
+
+  -- Build providers first
+  providerResults <- mapM buildTarget providers
+
+  -- Build consumers: run hub-codegen for plugins only, then write shim files
+  consumerResults <- forM consumers $ \(name, tc) -> do
+    let config = buildConfigFromTarget opts sc tc
+    logInfo $ "Building \"" <> name <> "\" → " <> T.pack (optOutput (cfgOptions config))
+    logDebug (optDebug opts) $ "  target \"" <> name <> "\" uses sharedTransport"
+    -- Run normal pipeline for plugins (generate list should be ["plugins"])
+    result <- runPipeline config tools
+    -- Write re-export shim files and update lock
+    case (result, tcSharedTransport tc) of
+      (Right _, Just providerName) ->
+        case Map.lookup providerName (scTargets sc) of
+          Just providerTc -> do
+            let shimFiles = generateShimFiles (tcOutputDir tc) (tcOutputDir providerTc)
+            createDirectoryIfMissing True (tcOutputDir tc)
+            forM_ (Map.toList shimFiles) $ \(fileName, content) -> do
+              let filePath = tcOutputDir tc </> T.unpack fileName
+              TIO.writeFile filePath content
+              logDebug (optDebug opts) $ "  Wrote shim: " <> T.pack filePath
+            -- Update lock file with shim file hashes
+            lock <- fromMaybe Lock.emptySynapseLock <$> Lock.readSynapseLock
+            let outputKey = T.pack (tcOutputDir tc)
+            case Map.lookup outputKey (Lock.slTargets lock) of
+              Just lt -> do
+                let shimHashes = Map.mapWithKey (\_ content -> Merge.computeFileHash content) shimFiles
+                    updatedLt = lt
+                      { Lock.ltSharedTransport = Just providerName
+                      , Lock.ltFiles = Map.union shimHashes (Lock.ltFiles lt)
+                      }
+                Lock.writeSynapseLock $ lock
+                  { Lock.slTargets = Map.insert outputKey updatedLt (Lock.slTargets lock) }
+              Nothing -> pure ()
+            logSuccess $ "Shim files written for \"" <> name <> "\""
+          Nothing -> pure ()  -- Should not happen (validated in Config.hs)
+      _ -> pure ()
+    pure (name, result)
+
+  pure $ providerResults ++ consumerResults
   where
     buildTarget (name, tc) = do
       let config = buildConfigFromTarget opts sc tc
@@ -500,6 +550,40 @@ runBuildFromConfig sc opts tools =
                    then runTransportOnlyPipeline config tools
                    else runPipeline config tools
       pure (name, result)
+
+-- | Generate re-export shim files for a child target that shares transport
+-- with a parent target. Computes the relative path from child → parent
+-- and returns a map of filename → shim content.
+generateShimFiles :: FilePath -> FilePath -> Map.Map Text Text
+generateShimFiles childDir parentDir =
+  let relPath = computeRelativePath childDir parentDir
+      shimContent file = "export * from '" <> relPath <> "/" <> file <> "';\n"
+  in Map.fromList
+    [ ("transport.ts", shimContent "transport")
+    , ("rpc.ts",       shimContent "rpc")
+    , ("types.ts",     shimContent "types")
+    ]
+
+-- | Compute the relative path from childDir to parentDir.
+-- E.g., "generated/substrate" → "generated" yields ".."
+-- E.g., "src/gen/sub" → "src/gen" yields ".."
+-- E.g., "generated-sub" → "generated" yields "../generated"
+computeRelativePath :: FilePath -> FilePath -> Text
+computeRelativePath childDir parentDir =
+  let -- splitPath keeps trailing '/' on components; strip for comparison
+      normalize = map (filter (/= '/'))
+      childParts  = normalize (splitPath childDir)
+      parentParts = normalize (splitPath parentDir)
+      -- Find common prefix length
+      commonLen   = length $ takeWhile id $ zipWith (==) childParts parentParts
+      -- Steps up from child to common ancestor
+      stepsUp     = length childParts - commonLen
+      -- Steps down from common ancestor to parent
+      stepsDown   = drop commonLen parentParts
+      upParts     = replicate stepsUp ".."
+      relParts    = upParts ++ stepsDown
+      rel = T.intercalate "/" $ map T.pack relParts
+  in if T.null rel then "." else rel
 
 -- ============================================================================
 -- Transport-Only Pipeline (no backend connection required)

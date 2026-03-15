@@ -75,13 +75,40 @@ validateSynapseConfig cfg = do
         else Right ()
 
 validateTargetConfig :: Map Text TargetConfig -> (Text, TargetConfig) -> Either Text ()
-validateTargetConfig _all (name, tc) = do
+validateTargetConfig allTargets (name, tc) = do
   if null (tcGenerate tc)
     then Left $ "target \"" <> name <> "\": \"generate\" list must not be empty"
     else Right ()
   if null (tcOutputDir tc)
     then Left $ "target \"" <> name <> "\": \"outputDir\" must not be empty"
     else Right ()
+  -- Validate sharedTransport references
+  case tcSharedTransport tc of
+    Nothing -> Right ()
+    Just ref -> do
+      -- 1. Referenced target must exist
+      case Map.lookup ref allTargets of
+        Nothing -> Left $ "target \"" <> name <> "\": sharedTransport references unknown target \"" <> ref <> "\""
+        Just provider -> do
+          -- 2. Provider must have "transport" in its generate list
+          if "transport" `notElem` tcGenerate provider && tcGenerate provider /= ["all"]
+            then Left $ "target \"" <> name <> "\": sharedTransport target \"" <> ref
+                      <> "\" does not generate transport"
+            else Right ()
+          -- 3. Both targets must use the same transport mode
+          if tcTransport tc /= tcTransport provider
+            then Left $ "target \"" <> name <> "\": transport mode differs from sharedTransport target \"" <> ref <> "\""
+            else Right ()
+          -- 4. Consumer must NOT include "transport" or "rpc" in its generate list
+          if "transport" `elem` tcGenerate tc || "rpc" `elem` tcGenerate tc
+            then Left $ "target \"" <> name
+                      <> "\": generate must not include \"transport\" or \"rpc\" when using sharedTransport"
+            else Right ()
+          -- 5. No circular references
+          case tcSharedTransport provider of
+            Just _ -> Left $ "target \"" <> name <> "\": sharedTransport chain detected (\"" <> ref
+                           <> "\" also uses sharedTransport)"
+            Nothing -> Right ()
 
 -- ============================================================================
 -- Config-to-Runtime Conversions
@@ -155,6 +182,6 @@ prettyConfig = Pretty.defConfig
   { Pretty.confCompare = Pretty.keyOrder
       [ "schema", "language", "backend", "url", "packageManager"
       , "watch", "pollInterval", "hotReload"
-      , "targets", "generate", "transport", "outputDir", "smokePath"
+      , "targets", "generate", "transport", "outputDir", "smokePath", "sharedTransport"
       ]
   }

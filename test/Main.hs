@@ -848,26 +848,28 @@ main = do
 
         it "rejects target with empty generate list" $ do
           let badTarget = TargetConfig
-                { tcGenerate  = []
-                , tcTransport = WsTransport
-                , tcOutputDir = "out"
-                , tcSmokePath = Nothing
-                , tcBackend   = Nothing
-                , tcUrl       = Nothing
-                , tcPlugins   = Nothing
+                { tcGenerate        = []
+                , tcTransport       = WsTransport
+                , tcOutputDir       = "out"
+                , tcSmokePath       = Nothing
+                , tcBackend         = Nothing
+                , tcUrl             = Nothing
+                , tcPlugins         = Nothing
+                , tcSharedTransport = Nothing
                 }
           let cfg = defaultSynapseConfig { scTargets = Map.singleton "t" badTarget }
           validateSynapseConfig cfg `shouldSatisfy` isLeft
 
         it "rejects target with empty outputDir" $ do
           let badTarget = TargetConfig
-                { tcGenerate  = ["plugins"]
-                , tcTransport = WsTransport
-                , tcOutputDir = ""
-                , tcSmokePath = Nothing
-                , tcBackend   = Nothing
-                , tcUrl       = Nothing
-                , tcPlugins   = Nothing
+                { tcGenerate        = ["plugins"]
+                , tcTransport       = WsTransport
+                , tcOutputDir       = ""
+                , tcSmokePath       = Nothing
+                , tcBackend         = Nothing
+                , tcUrl             = Nothing
+                , tcPlugins         = Nothing
+                , tcSharedTransport = Nothing
                 }
           let cfg = defaultSynapseConfig { scTargets = Map.singleton "t" badTarget }
           validateSynapseConfig cfg `shouldSatisfy` isLeft
@@ -1051,7 +1053,7 @@ main = do
           Map.lookup "echo" (extractPluginHashesFromBytes ir) `shouldBe` Just ""
 
       describe "filterTargets" $ do
-        let mkTarget gen = TargetConfig gen WsTransport "out" Nothing Nothing Nothing Nothing
+        let mkTarget gen = TargetConfig gen WsTransport "out" Nothing Nothing Nothing Nothing Nothing
         let targets = Map.fromList
               [ ("client", mkTarget ["transport", "rpc", "plugins"])
               , ("smoke",  mkTarget ["smoke"])
@@ -1081,28 +1083,28 @@ main = do
         it "sets outputDir from target" $ do
           let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
           let sc  = defaultSynapseConfig { scUrl = Just "ws://localhost:4444" }
-          let tc  = TargetConfig ["plugins"] BrowserTransport "my/output/dir" Nothing Nothing Nothing Nothing
+          let tc  = TargetConfig ["plugins"] BrowserTransport "my/output/dir" Nothing Nothing Nothing Nothing Nothing
           let cfg = buildConfigFromTarget wa sc tc
           optOutput (cfgOptions cfg) `shouldBe` "my/output/dir"
 
         it "sets transport from target" $ do
           let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
           let sc  = defaultSynapseConfig
-          let tc  = TargetConfig ["plugins"] BrowserTransport "out" Nothing Nothing Nothing Nothing
+          let tc  = TargetConfig ["plugins"] BrowserTransport "out" Nothing Nothing Nothing Nothing Nothing
           let cfg = buildConfigFromTarget wa sc tc
           optTransport (cfgOptions cfg) `shouldBe` BrowserTransport
 
         it "parses host from URL" $ do
           let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
           let sc  = defaultSynapseConfig { scUrl = Just "ws://myhost:9000" }
-          let tc  = TargetConfig ["plugins"] WsTransport "out" Nothing Nothing Nothing Nothing
+          let tc  = TargetConfig ["plugins"] WsTransport "out" Nothing Nothing Nothing Nothing Nothing
           let cfg = buildConfigFromTarget wa sc tc
           cfgHost cfg `shouldBe` "myhost"
 
         it "parses port from URL" $ do
           let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
           let sc  = defaultSynapseConfig { scUrl = Just "ws://localhost:9000" }
-          let tc  = TargetConfig ["plugins"] WsTransport "out" Nothing Nothing Nothing Nothing
+          let tc  = TargetConfig ["plugins"] WsTransport "out" Nothing Nothing Nothing Nothing Nothing
           let cfg = buildConfigFromTarget wa sc tc
           cfgPort cfg `shouldBe` "9000"
 

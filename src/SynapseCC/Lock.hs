@@ -31,10 +31,11 @@ synapseLockPath = "synapse.lock"
 
 -- | Per-target entry in synapse.lock, keyed by outputDir
 data LockTarget = LockTarget
-  { ltBackend   :: !Text
-  , ltIrHash    :: !Text
-  , ltTransport :: !Text
-  , ltFiles     :: !(Map Text Text)  -- ^ relPath → content hash
+  { ltBackend         :: !Text
+  , ltIrHash          :: !Text
+  , ltTransport       :: !Text
+  , ltFiles           :: !(Map Text Text)  -- ^ relPath → content hash
+  , ltSharedTransport :: !(Maybe Text)     -- ^ Name of provider target (if transport is shared)
   } deriving (Show, Eq)
 
 instance FromJSON LockTarget where
@@ -43,14 +44,17 @@ instance FromJSON LockTarget where
     <*> o Aeson..: "irHash"
     <*> o Aeson..: "transport"
     <*> o Aeson..: "files"
+    <*> o Aeson..:? "sharedTransport"
 
 instance ToJSON LockTarget where
-  toJSON lt = Aeson.object
+  toJSON lt = Aeson.object $
     [ "backend"   Aeson..= ltBackend lt
     , "irHash"    Aeson..= ltIrHash lt
     , "transport" Aeson..= ltTransport lt
     , "files"     Aeson..= ltFiles lt
-    ]
+    ] ++ case ltSharedTransport lt of
+           Nothing -> []
+           Just st -> ["sharedTransport" Aeson..= st]
 
 -- | Top-level synapse.lock structure
 data SynapseLock = SynapseLock
@@ -96,7 +100,7 @@ lockPrettyConfig :: Pretty.Config
 lockPrettyConfig = Pretty.defConfig
   { Pretty.confCompare = Pretty.keyOrder
       [ "version", "synapseCC", "hubCodegen", "updatedAt", "targets"
-      , "backend", "irHash", "transport", "files"
+      , "backend", "irHash", "transport", "files", "sharedTransport"
       ]
   }
 
