@@ -148,6 +148,29 @@ generateTsconfig transport =
     , "}"
     ]
 
+-- | Generate tsconfig.json for integration mode (generated code inside a host project).
+-- Enables project references (composite, declaration, declarationMap) so the host
+-- project can reference the generated directory as a sub-project with its own settings.
+generateIntegrationTsconfig :: Text
+generateIntegrationTsconfig = T.unlines
+    [ "{"
+    , "  \"compilerOptions\": {"
+    , "    \"target\": \"ES2022\","
+    , "    \"module\": \"ES2022\","
+    , "    \"moduleResolution\": \"bundler\","
+    , "    \"composite\": true,"
+    , "    \"declaration\": true,"
+    , "    \"declarationMap\": true,"
+    , "    \"strict\": true,"
+    , "    \"skipLibCheck\": true,"
+    , "    \"esModuleInterop\": true,"
+    , "    \"outDir\": \"../dist/generated\","
+    , "    \"rootDir\": \".\""
+    , "  },"
+    , "  \"include\": [\"**/*.ts\"]"
+    , "}"
+    ]
+
 -- | Run the full pipeline without cache
 runFullPipeline :: Config -> ToolLocations -> IO (Either SynapseCCError CompiledPath)
 runFullPipeline config tools = do
@@ -261,12 +284,14 @@ runFullPipeline config tools = do
 
           let genPath = GeneratedPath outputDir
 
-          -- Write synapse-cc's tsconfig to the output dir (standalone mode only).
-          -- Integration mode: host project owns tsconfig at its root; we don't touch it.
-          -- The tsconfig only covers *.ts (not test/) so tsc never sees bun:test imports.
-          unless isIntegration $ do
-            logDebug debug "  Writing tsconfig.json"
-            TIO.writeFile (outputDir </> "tsconfig.json") (generateTsconfig (optTransport opts))
+          -- Write synapse-cc's tsconfig to the output dir.
+          -- Standalone mode: tight config (noEmit, transport-specific types).
+          -- Integration mode: project-references config (composite, declaration).
+          do logDebug debug "  Writing tsconfig.json"
+             let tsconfig = if isIntegration
+                              then generateIntegrationTsconfig
+                              else generateTsconfig (optTransport opts)
+             TIO.writeFile (outputDir </> "tsconfig.json") tsconfig
 
           -- Step 3: Install dependencies (if enabled)
           -- Standalone: deps go into the generated dir (genPath) — it owns its own package.json.
