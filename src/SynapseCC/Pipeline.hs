@@ -28,6 +28,8 @@ import System.FilePath ((</>), splitPath)
 
 import Synapse.Monad (initEnv, runSynapseM, SynapseError(..))
 import Synapse.IR.Builder (buildIR)
+import qualified Synapse.Log as Log
+import qualified Katip
 
 import SynapseCC.Benchmark (timeStep, baselinePath, reportBenchmarks)
 import SynapseCC.Config (buildConfigFromTarget)
@@ -694,7 +696,8 @@ generateIR config _tools = do
   -- Call plexus-synapse library directly (no subprocess).
   -- Pass [] as path: the backend is encoded in the env; [] = walk from root.
   logDebug debug $ "  Connecting to " <> host <> ":" <> T.pack (show port)
-  env <- initEnv host port bkName
+  logger <- Log.makeLogger Katip.ErrorS
+  env <- initEnv host port bkName logger
   -- Wrap in try to catch hard exceptions from child-plugin fetch errors
   rawResult <- try (runSynapseM env (buildIR generatorInfo []))
   result <- case rawResult of
