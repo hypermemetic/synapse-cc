@@ -42,6 +42,8 @@ import qualified Plexus.Transport as Transport
 import Plexus.Types (PlexusStreamItem(..))
 import Synapse.Monad (initEnv, runSynapseM)
 import Synapse.IR.Builder (buildIR)
+import qualified Synapse.Log as Log
+import qualified Katip
 
 import SynapseCC.Cache (expandTilde)
 import qualified SynapseCC.Config as Config
@@ -206,7 +208,8 @@ handleHashChange watchArgs synapseConfig tools debug _newHash = do
   t0 <- getCurrentTime
 
   -- Fetch fresh IR via plexus-synapse library
-  env <- initEnv host port bkName
+  logger <- Log.makeLogger Katip.ErrorS
+  env <- initEnv host port bkName logger
   irResult <- runSynapseM env (buildIR generatorInfo [])
 
   case irResult of
