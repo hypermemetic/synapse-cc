@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               synapse-cc
-version:            0.3.2
+version:            0.3.3
 synopsis:           Unified compiler toolchain for Plexus backends
 description:
   synapse-cc orchestrates the complete pipeline from backend schema
