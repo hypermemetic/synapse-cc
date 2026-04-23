@@ -1,12 +1,27 @@
 ---
 id: SAFE-6
 title: "synapse-cc warns on cookie auth mismatch"
-status: Pending
+status: Complete
 type: implementation
 blocked_by: [REQ-6, SAFE-7]
 unlocks: []
 severity: Medium
 ---
+
+**Implemented Apr 23 2026 (autonomous run):** New `SynapseCC.AuthCheck` module
+(`src/SynapseCC/AuthCheck.hs`) detects backends requiring cookie-driven WS auth
+(any IR method has `pdSource.from = "auth"`, emitted by REQ-6 from
+`#[from_auth(...)]`). When detected, inspects the target output dir's
+`transport.ts` for the `SAFE-7-cookie-auth-marker` string. Emits a warning
+if missing; silent otherwise.
+
+Integrated in `SynapseCC.Pipeline.runFullPipeline` before `generateCode`
+overwrites transport.ts, so the check sees the stale pre-SAFE-7 state.
+
+Verified with 7 tests in `test/AuthCheckSpec.hs` covering positive
+detection, negative detection (RPC-only, cookie-but-no-auth), and four
+end-to-end scenarios (first build, stale transport.ts, marked
+transport.ts, no-auth backend). `cabal test safe6-authcheck` passes 7/7.
 
 ## Problem
 
