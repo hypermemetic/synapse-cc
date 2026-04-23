@@ -44,6 +44,7 @@ import qualified SynapseCC.Merge as Merge
 import qualified SynapseCC.Lock as Lock
 import qualified SynapseCC.Auth as Auth
 import qualified SynapseCC.RegistryResolve as Registry
+import qualified SynapseCC.AuthCheck as AuthCheck
 
 -- ============================================================================
 -- Pipeline Orchestration
@@ -204,6 +205,15 @@ runFullPipeline config tools = do
             Left _               -> 0
       logSuccess $ "Schema ready (" <> T.pack (show pluginCount) <> " plugins)"
       logDebug debug $ "  IR at " <> T.pack (unIRPath irPath)
+
+      -- SAFE-6: warn if backend requires cookie auth but the target's
+      -- existing transport.ts lacks the SAFE-7 marker. Runs BEFORE
+      -- regeneration so the inspection sees the stale (pre-SAFE-7) output.
+      let outputDir = optOutput (cfgOptions config)
+      mWarn <- AuthCheck.detectCookieAuthMismatch (unIRPath irPath) outputDir
+      case mWarn of
+        Just w  -> logInfo w
+        Nothing -> pure ()
 
       -- Step 2: Generate code
       logStep "Generating code..."

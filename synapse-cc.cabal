@@ -19,6 +19,7 @@ library
     import:           warnings
     exposed-modules:  SynapseCC.Types
                     , SynapseCC.Auth
+                    , SynapseCC.AuthCheck
                     , SynapseCC.RegistryResolve
                     , SynapseCC.CLI
                     , SynapseCC.Config
@@ -106,3 +107,19 @@ test-suite synapse-cc-test
     default-extensions: OverloadedStrings
                       , LambdaCase
                       , ScopedTypeVariables
+
+test-suite safe6-authcheck
+    default-language: Haskell2010
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          AuthCheckSpec.hs
+    build-depends:    base >= 4.14 && < 5
+                    , synapse-cc
+                    , aeson >= 2.0
+                    , aeson-qq >= 0.8
+                    , bytestring >= 0.11
+                    , filepath >= 1.4
+                    , temporary >= 1.3
+                    , text >= 1.2
+    default-extensions: OverloadedStrings, QuasiQuotes
+    ghc-options:      -threaded
