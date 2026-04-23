@@ -1,12 +1,14 @@
 ---
 id: SAFE-5
 title: "synapse decodes semantic JSON-RPC error codes"
-status: Pending
+status: Complete
 type: implementation
 blocked_by: []
 unlocks: []
 severity: Medium
 ---
+
+**Implemented Apr 22 2026 (autonomous run):** `Synapse.Transport.transportErrorToText` now passes `ProtocolError` through `renderProtocolError`, which parses `errCode` and `errMessage` from the wire-formatted `RpcErrorObj {...}` string and rewrites `-32001` (auth + token-resolution hint), `-32602` (invalid params + --help hint), `-32601` (method not found + listing hint), `-32000` (execution error). Other codes preserve the existing generic format. Pure-function helpers `extractErrCode` / `extractErrMessage` are testable in isolation.
 
 ## Problem
 

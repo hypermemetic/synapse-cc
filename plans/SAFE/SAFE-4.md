@@ -1,12 +1,14 @@
 ---
 id: SAFE-4
 title: "synapse-cc version-gates IR against plexus-core"
-status: Pending
+status: Complete
 type: implementation
 blocked_by: []
 unlocks: []
 severity: Medium
 ---
+
+**Implemented Apr 22 2026 (autonomous run, degraded mode per SAFE-S01):** `ToolchainVersions` gains `tvPlexusCore :: Maybe Text`. Cache writers stamp `Nothing` today (verified in `~/.cache/plexus-codegen/synapse/ir/<bk>/manifest.json`). Debug-level log notes that version-gating is inactive. Full mode (cache invalidation on major bump) activates with no further synapse-cc changes once SAFE-S02 lands plexus-core-side.
 
 ## Problem
 

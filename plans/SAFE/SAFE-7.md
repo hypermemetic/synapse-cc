@@ -1,12 +1,14 @@
 ---
 id: SAFE-7
 title: "hub-codegen TS client uses cookies on WS upgrade"
-status: Pending
+status: Complete
 type: implementation
 blocked_by: []
 unlocks: [SAFE-6, REQ-7]
 severity: High
 ---
+
+**Implemented Apr 22 2026 (autonomous run):** Generated `transport.ts` carries the marker comment `SAFE-7-cookie-auth-marker` (used by SAFE-6 detection), exposes `authToken?: string` on `PlexusRpcConfig` with JSDoc explaining Node vs browser semantics, and on connect passes `{ headers: { Cookie: 'access_token=...' } }` to the `ws` library. Zero `?token=` URL-construction occurrences in any generated transport.ts. Verified across substrate (98 files) and lforge (21 files); both `tsc --noEmit` clean.
 
 ## Problem
 

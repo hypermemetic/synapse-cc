@@ -1,12 +1,14 @@
 ---
 id: SAFE-2
 title: "synapse-cc threads JWT token through Options"
-status: Pending
+status: Complete
 type: implementation
 blocked_by: []
 unlocks: []
 severity: High
 ---
+
+**Implemented Apr 22 2026 (autonomous run):** New `SynapseCC.Auth` module mirrors synapse's `resolveToken` with added `SYNAPSE_TOKEN` env var. `Options` gains `optToken` / `optTokenFile`. CLI gains `--token`/`-t` and `--token-file` on build + watch. `Pipeline.hs:700` and `Watch.hs:213` resolve and pass the token to `initEnv`. Verified: `synapse-cc build typescript substrate --token X` succeeds; `SYNAPSE_TOKEN=X synapse-cc build` succeeds. SAFE-S03 tracks deduplication once REQ-5 ships fully.
 
 ## Problem
 

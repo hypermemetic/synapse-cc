@@ -1,12 +1,14 @@
 ---
 id: SAFE-3
 title: "synapse-cc discovers backends via the Plexus registry"
-status: Pending
+status: Complete
 type: implementation
 blocked_by: []
 unlocks: []
 severity: High
 ---
+
+**Implemented Apr 22 2026 (autonomous run):** New `SynapseCC.RegistryResolve` wraps `Synapse.Backend.Discovery.registryDiscovery`. `Pipeline.generateIR` resolves the backend name via the registry at `--host`/`--port` (defaults `127.0.0.1:4444`). Falls back to that address when the registry is unreachable (preserves the "substrate IS the registry" legacy path). Returns `BackendUnreachable` with a list of known backends + `synapse-cc init` hint when the name is unknown. Verified: `synapse-cc build typescript lforge` succeeds with no `-P` flag (registry resolves to `127.0.0.1:44104`); bogus backend errors with helpful list.
 
 ## Problem
 
