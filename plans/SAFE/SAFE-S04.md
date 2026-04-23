@@ -1,12 +1,29 @@
 ---
 id: SAFE-S04
 title: "Follow-up: complete REQ-5's CLI flags + pre-flight check + env var scanning"
-status: Pending
+status: Partial
 type: implementation
 blocked_by: []
 unlocks: []
 severity: Low
 ---
+
+**Partial implementation Apr 23 2026 (autonomous run):** `--cookie KEY=VALUE`,
+`--header KEY=VALUE`, `SYNAPSE_COOKIE_<KEY>` and `SYNAPSE_HEADER_<KEY>`
+landed in `synapse/app/Main.hs`. Plumbed through `SynapseEnv` (new
+`seCookies`/`seHeaders` fields + `withRequestContext` helper) and
+`Synapse.Transport.getConfig` via `mergeUpgradeHeaders`, which builds
+the WS upgrade Headers from optional token, extra cookies (single
+Cookie header, semicolon-joined), and extra headers. Verified against
+uscis end-to-end: cookies and headers reach the WS upgrade.
+
+**Still deferred:**
+- `--query KEY=VALUE` flag (no consumer in uscis FormVeritasRequest; out of scope tonight)
+- Pre-flight `checkRequestSatisfied` warning (REQ-5 §5) — would inspect the
+  IR's `irPluginRequests[namespace]` and warn when a required cookie/header
+  field has no satisfying source in the env. Untestable end-to-end against
+  uscis because all FormVeritasRequest fields are derived (no required
+  cookie/header keys to flag).
 
 ## Problem
 
