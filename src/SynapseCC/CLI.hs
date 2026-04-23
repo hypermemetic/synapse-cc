@@ -143,7 +143,7 @@ initCommandParser = pure CmdInit
 -- | Options relevant to watch mode.
 -- host/port come from synapse.config.json (not CLI flags for watch).
 watchOptionsParser :: Parser Options
-watchOptionsParser = (\cacheDir debug synapse hub ->
+watchOptionsParser = (\cacheDir debug synapse hub token tokenFile ->
   defaultOptions
     { optInstallDeps    = False
     , optBuild          = False
@@ -152,6 +152,8 @@ watchOptionsParser = (\cacheDir debug synapse hub ->
     , optDebug          = debug
     , optSynapsePath    = synapse
     , optHubCodegenPath = hub
+    , optToken          = token
+    , optTokenFile      = tokenFile
     })
   <$> option str
       ( long "cache-dir"
@@ -163,6 +165,8 @@ watchOptionsParser = (\cacheDir debug synapse hub ->
   <*> switch (long "debug" <> help "Enable debug logging")
   <*> optional (option str (long "synapse"     <> metavar "PATH" <> help "synapse binary path"))
   <*> optional (option str (long "hub-codegen" <> metavar "PATH" <> help "hub-codegen binary path"))
+  <*> optional (T.pack <$> option str (long "token" <> short 't' <> metavar "JWT" <> help "JWT auth token (overrides SYNAPSE_TOKEN, --token-file, ~/.plexus/tokens/<backend>)"))
+  <*> optional (option str (long "token-file" <> metavar "PATH" <> help "Read JWT token from file"))
 
 -- ============================================================================
 -- Shared Parsers
@@ -271,6 +275,17 @@ optionsParser = Options
       ( long "hub-codegen"
      <> metavar "PATH"
      <> help "Path to hub-codegen binary (overrides discovery)"
+      ))
+  <*> optional (T.pack <$> option str
+      ( long "token"
+     <> short 't'
+     <> metavar "JWT"
+     <> help "JWT auth token (overrides SYNAPSE_TOKEN env, --token-file, ~/.plexus/tokens/<backend>)"
+      ))
+  <*> optional (option str
+      ( long "token-file"
+     <> metavar "PATH"
+     <> help "Read JWT token from file (overrides ~/.plexus/tokens/<backend>)"
       ))
 
 -- ============================================================================

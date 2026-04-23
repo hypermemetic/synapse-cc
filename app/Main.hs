@@ -67,8 +67,8 @@ main = do
 
         Right tools -> do
           logSuccess "Found all required tools"
-          logStep $ "Connecting to " <> backendName (cfgBackend config)
-                 <> " at ws://" <> cfgHost config <> ":" <> cfgPort config <> "..."
+          logStep $ "Resolving " <> backendName (cfgBackend config)
+                 <> " via registry at ws://" <> cfgHost config <> ":" <> cfgPort config <> "..."
 
           pipelineResult <- runPipeline config tools
           case pipelineResult of

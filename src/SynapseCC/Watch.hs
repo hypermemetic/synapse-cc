@@ -52,6 +52,7 @@ import SynapseCC.Logging
 import SynapseCC.Merge (applyMerge)
 import SynapseCC.Pipeline (formatSynapseError, generateCode, runPipeline)
 import SynapseCC.Types
+import qualified SynapseCC.Auth as Auth
 
 -- ============================================================================
 -- Public Entry Point
@@ -209,7 +210,9 @@ handleHashChange watchArgs synapseConfig tools debug _newHash = do
 
   -- Fetch fresh IR via plexus-synapse library
   logger <- Log.makeLogger Katip.ErrorS
-  env <- initEnv host port bkName logger Nothing
+  -- SAFE-2: resolve JWT token before connecting
+  token <- Auth.resolveToken opts bkName
+  env <- initEnv host port bkName logger token
   irResult <- runSynapseM env (buildIR generatorInfo [])
 
   case irResult of

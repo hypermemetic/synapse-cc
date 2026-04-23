@@ -135,6 +135,8 @@ data Options = Options
   , optDebug           :: !Bool
   , optSynapsePath     :: !(Maybe FilePath)  -- ^ Override synapse binary path
   , optHubCodegenPath  :: !(Maybe FilePath)  -- ^ Override hub-codegen binary path
+  , optToken           :: !(Maybe Text)      -- ^ JWT token (--token; SAFE-2)
+  , optTokenFile       :: !(Maybe FilePath)  -- ^ Token file path (--token-file; SAFE-2)
   } deriving stock (Show, Eq, Generic)
 
 -- | Default options
@@ -150,6 +152,8 @@ defaultOptions = Options
   , optDebug           = False
   , optSynapsePath     = Nothing
   , optHubCodegenPath  = Nothing
+  , optToken           = Nothing
+  , optTokenFile       = Nothing
   }
 
 -- ============================================================================
@@ -362,6 +366,7 @@ data ToolchainVersions = ToolchainVersions
   { tvSynapseCC   :: !Text
   , tvSynapse     :: !Text
   , tvHubCodegen  :: !(Maybe Text)  -- Only known after codegen
+  , tvPlexusCore  :: !(Maybe Text)  -- SAFE-4: backend-reported plexus-core version (Nothing until SAFE-S02)
   } deriving stock (Show, Eq, Generic)
     deriving anyclass (FromJSON, ToJSON)
 

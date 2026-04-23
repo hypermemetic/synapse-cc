@@ -42,6 +42,8 @@ import qualified SynapseCC.Cache as Cache
 import SynapseCC.Cache (getCacheDir)
 import qualified SynapseCC.Merge as Merge
 import qualified SynapseCC.Lock as Lock
+import qualified SynapseCC.Auth as Auth
+import qualified SynapseCC.RegistryResolve as Registry
 
 -- ============================================================================
 -- Pipeline Orchestration
@@ -51,6 +53,11 @@ import qualified SynapseCC.Lock as Lock
 runPipeline :: Config -> ToolLocations -> IO (Either SynapseCCError CompiledPath)
 runPipeline config tools = do
   let debug = optDebug (cfgOptions config)
+
+  -- SAFE-4 (degraded mode): plexus-core does not yet expose its toolchain
+  -- version (see SAFE-S01 spike). Warn once per build that version-gating
+  -- is inactive until SAFE-S02 lands.
+  logDebug debug "  SAFE-4: version-gating inactive (plexus-core does not expose toolchain version; see SAFE-S02)"
 
   -- Step 0: Check cache (unless --force is set)
   cacheResult <- Cache.validateCache config tools
@@ -679,51 +686,71 @@ generateIR config _tools = do
       Backend bkName = cfgBackend config
       outputDir = optOutput (cfgOptions config)
       opts = cfgOptions config
-      host = cfgHost config
-      port = read (T.unpack (cfgPort config)) :: Int
+      regHost = cfgHost config
+      regPort = read (T.unpack (cfgPort config)) :: Int
       generatorInfo = ["synapse-cc:" <> synapseCCVersion]
 
-  -- Compute IR file path in the cache directory:
-  --   <cacheDir>/synapse/ir/<backend>/ir.json
-  cacheDir <- getCacheDir opts
-  let irDir  = cacheDir </> "synapse" </> "ir" </> T.unpack bkName
-      irFile = irDir </> "ir.json"
+  -- SAFE-3: resolve backend host:port via the registry.
+  -- The registry's location is taken from --host/--port (defaults: 127.0.0.1:4444).
+  resolution <- Registry.resolveBackendAddress regHost regPort bkName
+  hpResult <- case resolution of
+    Registry.ResolvedFromRegistry h p -> do
+      logDebug debug $ "  Registry resolved " <> bkName <> " -> " <> h <> ":" <> T.pack (show p)
+      pure $ Right (h, p)
+    Registry.ResolvedFallback h p -> do
+      logDebug debug $ "  Registry unreachable; using provided address " <> h <> ":" <> T.pack (show p)
+      pure $ Right (h, p)
+    Registry.NotInRegistry known ->
+      pure $ Left $ BackendUnreachable bkName $
+        "Backend '" <> bkName <> "' not in registry. Known: "
+        <> (if null known then "<none>" else T.intercalate ", " known)
+        <> ". Hint: run 'synapse-cc init' to scaffold a synapse.config.json"
+  case hpResult of
+    Left e -> pure (Left e)
+    Right (host, port) -> do
+      -- Compute IR file path in the cache directory:
+      --   <cacheDir>/synapse/ir/<backend>/ir.json
+      cacheDir <- getCacheDir opts
+      let irDir  = cacheDir </> "synapse" </> "ir" </> T.unpack bkName
+          irFile = irDir </> "ir.json"
 
-  -- Ensure output and IR cache directories exist
-  createDirectoryIfMissing True outputDir
-  createDirectoryIfMissing True irDir
+      -- Ensure output and IR cache directories exist
+      createDirectoryIfMissing True outputDir
+      createDirectoryIfMissing True irDir
 
-  -- Call plexus-synapse library directly (no subprocess).
-  -- Pass [] as path: the backend is encoded in the env; [] = walk from root.
-  logDebug debug $ "  Connecting to " <> host <> ":" <> T.pack (show port)
-  logger <- Log.makeLogger Katip.ErrorS
-  env <- initEnv host port bkName logger Nothing
-  -- Wrap in try to catch hard exceptions from child-plugin fetch errors
-  rawResult <- try (runSynapseM env (buildIR generatorInfo []))
-  result <- case rawResult of
-    Left (ex :: SomeException) ->
-      let raw = T.pack (show ex)
-          msg = if "Connection refused" `T.isInfixOf` raw || "does not exist" `T.isInfixOf` raw
-                  then "Cannot connect to backend — is it running?"
-                  else T.takeWhile (/= '\n') raw
-      in pure $ Left msg
-    Right (Left synapseErr)    -> pure $ Left $ formatSynapseError synapseErr
-    Right (Right ir)           -> pure $ Right ir
+      -- Call plexus-synapse library directly (no subprocess).
+      -- Pass [] as path: the backend is encoded in the env; [] = walk from root.
+      logDebug debug $ "  Connecting to " <> host <> ":" <> T.pack (show port)
+      logger <- Log.makeLogger Katip.ErrorS
+      -- SAFE-2: resolve JWT token from --token / SYNAPSE_TOKEN / --token-file / ~/.plexus/tokens/<backend>
+      token <- Auth.resolveToken opts bkName
+      env <- initEnv host port bkName logger token
+      -- Wrap in try to catch hard exceptions from child-plugin fetch errors
+      rawResult <- try (runSynapseM env (buildIR generatorInfo []))
+      result <- case rawResult of
+        Left (ex :: SomeException) ->
+          let raw = T.pack (show ex)
+              msg = if "Connection refused" `T.isInfixOf` raw || "does not exist" `T.isInfixOf` raw
+                      then "Cannot connect to backend — is it running?"
+                      else T.takeWhile (/= '\n') raw
+          in pure $ Left msg
+        Right (Left synapseErr)    -> pure $ Left $ formatSynapseError synapseErr
+        Right (Right ir)           -> pure $ Right ir
 
-  case result of
-    Left msg -> do
-      logDebug debug $ "  Synapse error: " <> msg
-      pure $ Left $ SynapseError msg 1
+      case result of
+        Left msg -> do
+          logDebug debug $ "  Synapse error: " <> msg
+          pure $ Left $ SynapseError msg 1
 
-    Right ir -> do
-      -- Encode IR to JSON and write to cache path
-      let irBytes = BL.toStrict (Aeson.encode ir)
-      BS.writeFile irFile irBytes
+        Right ir -> do
+          -- Encode IR to JSON and write to cache path
+          let irBytes = BL.toStrict (Aeson.encode ir)
+          BS.writeFile irFile irBytes
 
-      -- Validate by round-tripping (ensures we can parse what we wrote)
-      case eitherDecodeStrict irBytes of
-        Left parseErr -> pure $ Left $ InvalidIR $ T.pack parseErr
-        Right (_ :: IRData) -> pure $ Right $ IRPath irFile
+          -- Validate by round-tripping (ensures we can parse what we wrote)
+          case eitherDecodeStrict irBytes of
+            Left parseErr -> pure $ Left $ InvalidIR $ T.pack parseErr
+            Right (_ :: IRData) -> pure $ Right $ IRPath irFile
 
 -- | Format a SynapseError (from plexus-synapse) for display
 formatSynapseError :: SynapseError -> Text

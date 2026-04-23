@@ -18,6 +18,8 @@ common warnings
 library
     import:           warnings
     exposed-modules:  SynapseCC.Types
+                    , SynapseCC.Auth
+                    , SynapseCC.RegistryResolve
                     , SynapseCC.CLI
                     , SynapseCC.Config
                     , SynapseCC.Detect

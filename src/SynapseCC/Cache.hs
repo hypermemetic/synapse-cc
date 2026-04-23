@@ -339,6 +339,7 @@ writeIRCacheManifest opts backend plugins synapseVer = do
             { tvSynapseCC = synapseCCVersion
             , tvSynapse = synapseVer
             , tvHubCodegen = Nothing
+            , tvPlexusCore = Nothing  -- SAFE-4 degraded mode: backend doesn't expose version yet (SAFE-S02)
             }
         , ircmUpdatedAt = timestamp
         , ircmPlugins = plugins
@@ -363,6 +364,7 @@ writeCodeCacheManifest opts backend target plugins synapseVer hubCodegenVer = do
             { tvSynapseCC = synapseCCVersion
             , tvSynapse = synapseVer
             , tvHubCodegen = Just hubCodegenVer
+            , tvPlexusCore = Nothing  -- SAFE-4 degraded mode (SAFE-S02)
             }
         , ccmUpdatedAt = timestamp
         , ccmPlugins = plugins
