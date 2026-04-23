@@ -697,7 +697,7 @@ generateIR config _tools = do
   -- Pass [] as path: the backend is encoded in the env; [] = walk from root.
   logDebug debug $ "  Connecting to " <> host <> ":" <> T.pack (show port)
   logger <- Log.makeLogger Katip.ErrorS
-  env <- initEnv host port bkName logger
+  env <- initEnv host port bkName logger Nothing
   -- Wrap in try to catch hard exceptions from child-plugin fetch errors
   rawResult <- try (runSynapseM env (buildIR generatorInfo []))
   result <- case rawResult of

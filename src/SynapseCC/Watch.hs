@@ -209,7 +209,7 @@ handleHashChange watchArgs synapseConfig tools debug _newHash = do
 
   -- Fetch fresh IR via plexus-synapse library
   logger <- Log.makeLogger Katip.ErrorS
-  env <- initEnv host port bkName logger
+  env <- initEnv host port bkName logger Nothing
   irResult <- runSynapseM env (buildIR generatorInfo [])
 
   case irResult of
