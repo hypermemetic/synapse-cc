@@ -8,6 +8,11 @@ unlocks: []
 severity: Low
 ---
 
+> **Implementation vehicle: SELF-3 + SELF-6** (in `synapse/plans/SELF/`). The SELF epic introduces a general defaults store (`Synapse.Self`) that subsumes the per-backend token file. SELF-3 removes the `~/.plexus/tokens/<backend>` path; SELF-6 deletes `SynapseCC.Auth.resolveToken` in favor of importing `Synapse.Self`. This ticket auto-closes when both land.
+
+> Note: the premise that `resolveToken` lives in `synapse/app/Main.hs` and is un-importable is addressed by SELF moving the canonical implementation into the `plexus-synapse` library (`Synapse.Self`) which synapse-cc already depends on.
+
+
 ## Problem
 
 SAFE-2 mirrors synapse's `resolveToken` function inside synapse-cc because synapse keeps `resolveToken` in `app/Main.hs` (executable scope) rather than `src/` (library scope), making it un-importable. The result is two near-identical copies of the priority chain (`--token > env > --token-file > ~/.plexus/tokens/<backend>`).
