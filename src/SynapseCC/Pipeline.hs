@@ -732,7 +732,8 @@ generateIR config _tools = do
       -- Pass [] as path: the backend is encoded in the env; [] = walk from root.
       logDebug debug $ "  Connecting to " <> host <> ":" <> T.pack (show port)
       logger <- Log.makeLogger Katip.ErrorS
-      -- SAFE-2: resolve JWT token from --token / SYNAPSE_TOKEN / --token-file / ~/.plexus/tokens/<backend>
+      -- SAFE-2: resolve JWT token from --token / SYNAPSE_TOKEN / --token-file /
+      -- cookies.access_token in ~/.plexus/<backend>/defaults.json (SELF-3)
       token <- Auth.resolveToken opts bkName
       env <- initEnv host port bkName logger token
       -- Wrap in try to catch hard exceptions from child-plugin fetch errors

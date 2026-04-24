@@ -165,7 +165,7 @@ watchOptionsParser = (\cacheDir debug synapse hub token tokenFile ->
   <*> switch (long "debug" <> help "Enable debug logging")
   <*> optional (option str (long "synapse"     <> metavar "PATH" <> help "synapse binary path"))
   <*> optional (option str (long "hub-codegen" <> metavar "PATH" <> help "hub-codegen binary path"))
-  <*> optional (T.pack <$> option str (long "token" <> short 't' <> metavar "JWT" <> help "JWT auth token (overrides SYNAPSE_TOKEN, --token-file, ~/.plexus/tokens/<backend>)"))
+  <*> optional (T.pack <$> option str (long "token" <> short 't' <> metavar "JWT" <> help "JWT auth token (overrides SYNAPSE_TOKEN, --token-file, and any access_token in ~/.plexus/<backend>/defaults.json)"))
   <*> optional (option str (long "token-file" <> metavar "PATH" <> help "Read JWT token from file"))
 
 -- ============================================================================
@@ -280,12 +280,12 @@ optionsParser = Options
       ( long "token"
      <> short 't'
      <> metavar "JWT"
-     <> help "JWT auth token (overrides SYNAPSE_TOKEN env, --token-file, ~/.plexus/tokens/<backend>)"
+     <> help "JWT auth token (overrides SYNAPSE_TOKEN env, --token-file, and any access_token in ~/.plexus/<backend>/defaults.json)"
       ))
   <*> optional (option str
       ( long "token-file"
      <> metavar "PATH"
-     <> help "Read JWT token from file (overrides ~/.plexus/tokens/<backend>)"
+     <> help "Read JWT token from file (overrides any access_token in ~/.plexus/<backend>/defaults.json)"
       ))
 
 -- ============================================================================
