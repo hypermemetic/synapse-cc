@@ -9,6 +9,8 @@ severity: Low
 ---
 
 > **Implementation vehicle: SELF-3 + SELF-6** (in `synapse/plans/SELF/`). The SELF epic introduces a general defaults store (`Synapse.Self`) that subsumes the per-backend token file. SELF-3 removes the `~/.plexus/tokens/<backend>` path; SELF-6 deletes `SynapseCC.Auth.resolveToken` in favor of importing `Synapse.Self`. This ticket auto-closes when both land.
+>
+> **Status (2026-04-24): SELF-3 landed; remaining dedup completes with SELF-6.** The legacy `~/.plexus/tokens/<backend>` path is now auto-migrated to `~/.plexus/<backend>/defaults.json` on first `Synapse.Self.loadDefaults` call (migration target is `literal:<jwt>` deliberately; keychain upgrade is an opt-in `_self` verb). `SynapseCC.Auth.resolveToken` no longer reads the legacy path — its final fallback delegates to `Synapse.Self.loadDefaults` + `defaultRegistry`. SELF-6 will collapse the module into a thin re-export of `Synapse.Self.resolveToken` and delete the synapse-cc-local mirror.
 
 > Note: the premise that `resolveToken` lives in `synapse/app/Main.hs` and is un-importable is addressed by SELF moving the canonical implementation into the `plexus-synapse` library (`Synapse.Self`) which synapse-cc already depends on.
 
