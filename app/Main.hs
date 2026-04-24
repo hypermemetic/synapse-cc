@@ -3,8 +3,10 @@ module Main where
 import Control.Monad (when, forM_)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import System.Exit (exitFailure, exitSuccess)
+import System.Exit (ExitCode(..), exitFailure, exitSuccess, exitWith)
 import System.IO (stdout, stderr, hSetEncoding, hSetBuffering, utf8, BufferMode(..))
+
+import qualified Synapse.Self.Command as SelfCmd
 
 import SynapseCC.CLI
 import SynapseCC.Config (initSynapseConfig, loadSynapseConfig, synapseConfigPath)
@@ -146,3 +148,15 @@ main = do
         Right tools -> do
           logSuccess "Found all required tools"
           runWatch watchArgs tools
+
+    -- ------------------------------------------------------------------
+    -- synapse-cc _self <backend> <verb> ...   (SELF-6)
+    -- ------------------------------------------------------------------
+    -- Delegates straight to the shared handler that @synapse _self@ uses.
+    -- Keeping the dispatch thin here (one line of real work) is the
+    -- point of SELF-6: both CLIs must stay behavior-identical.
+    CmdSelf selfCmd -> do
+      code <- SelfCmd.runSelfCommand selfCmd
+      case code of
+        ExitSuccess     -> exitSuccess
+        ExitFailure _   -> exitWith code

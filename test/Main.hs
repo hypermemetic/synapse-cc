@@ -37,6 +37,9 @@ import System.Process
   )
 import GHC.IO.Encoding (setLocaleEncoding, utf8)
 import Options.Applicative (execParserPure, defaultPrefs, getParseResult)
+import System.Environment (lookupEnv, setEnv, unsetEnv)
+import qualified Synapse.Self as Self
+import qualified SynapseCC.Auth as Auth
 import Plexus.Client (SubstrateConfig(..), defaultConfig)
 import qualified Plexus.Transport as Transport
 import Plexus.Types (TransportError(..), PlexusStreamItem)
@@ -985,11 +988,105 @@ main = do
             Just CmdInit -> pure ()
             other -> expectationFailure $ "Expected CmdInit, got: " ++ show other
 
+      -- SELF-6: `_self` subcommand. synapse-cc's job is to parse the
+      -- invocation and hand the resulting SelfCommand to the shared
+      -- runSelfCommand handler. These tests cover parsing only — the
+      -- handler's behavior is verified in plexus-synapse:self-test.
+      describe "_self subcommand" $ do
+        it "parses '_self BACKEND show'" $
+          parse ["_self", "testbk", "show"] `shouldSatisfy` isJust
+
+        it "produces CmdSelf" $
+          case parse ["_self", "testbk", "show"] of
+            Just (CmdSelf _) -> pure ()
+            other -> expectationFailure $ "Expected CmdSelf, got: " ++ show other
+
+        it "parses '_self BACKEND set cookie NAME VALUE'" $
+          case parse ["_self", "testbk", "set", "cookie", "access_token", "literal:abc"] of
+            Just (CmdSelf _) -> pure ()
+            other -> expectationFailure $ "Expected CmdSelf for set, got: " ++ show other
+
+        it "parses '_self BACKEND resolve header NAME'" $
+          case parse ["_self", "testbk", "resolve", "header", "authorization"] of
+            Just (CmdSelf _) -> pure ()
+            other -> expectationFailure $ "Expected CmdSelf for resolve, got: " ++ show other
+
       describe "legacy build parser compatibility" $ do
         it "synapseCCParserInfo still parses old-style args" $
           getParseResult (execParserPure defaultPrefs synapseCCParserInfo
             ["typescript", "substrate", "--no-build", "--no-tests"])
             `shouldSatisfy` isJust
+
+    -- ═══════════════════════════════════════════
+    -- SELF-6: dedup between SynapseCC.Auth.resolveToken
+    -- and Synapse.Self.resolveToken.
+    --
+    -- Proves the final-fallback path in SynapseCC.Auth delegates to
+    -- the shared Synapse.Self helper. With the CLI-flag + env-var
+    -- slots empty, SynapseCC.Auth.resolveToken must produce the same
+    -- Maybe Text as Synapse.Self.resolveToken for the same HOME.
+    -- ═══════════════════════════════════════════
+    describe "SELF-6 resolveToken dedup" $ do
+      let backend = "self6-dedup-test" :: Text
+          jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.sig" :: Text
+          -- Options with no CLI flags set (final-fallback regime).
+          bareOpts = defaultOptions { optToken = Nothing, optTokenFile = Nothing }
+
+          withIsolatedHome :: (FilePath -> IO a) -> IO a
+          withIsolatedHome action = do
+            -- SYNAPSE_TOKEN must not be set when exercising the fallback.
+            mPrevSynTok <- lookupEnv "SYNAPSE_TOKEN"
+            unsetEnv "SYNAPSE_TOKEN"
+            mPrevHome <- lookupEnv "HOME"
+            tmpRoot <- getTemporaryDirectory
+            let tmpHome = tmpRoot </> ("synapse-cc-self6-" <> T.unpack backend)
+            createDirectoryIfMissing True tmpHome
+            setEnv "HOME" tmpHome
+            r <- action tmpHome
+            -- Restore env; best-effort.
+            case mPrevHome of
+              Just h  -> setEnv "HOME" h
+              Nothing -> unsetEnv "HOME"
+            case mPrevSynTok of
+              Just v  -> setEnv "SYNAPSE_TOKEN" v
+              Nothing -> pure ()
+            removeDirectoryRecursive tmpHome
+            pure r
+
+      it "both return Nothing when no defaults file exists" $
+        withIsolatedHome $ \_home -> do
+          authResult <- Auth.resolveToken bareOpts backend
+          selfResult <- Self.resolveToken backend
+          authResult `shouldBe` Nothing
+          selfResult `shouldBe` Nothing
+
+      it "both return the resolved access_token cookie when defaults carry one" $
+        withIsolatedHome $ \_home -> do
+          -- Write a defaults.json with a literal: cookie.access_token
+          -- through the canonical library surface.
+          let sd0 = Self.emptyStoredDefaults
+              sd  = sd0 { Self.sdCookies =
+                            Map.singleton "access_token"
+                              (Self.CredentialRef ("literal:" <> jwt)) }
+          Self.writeDefaults backend sd
+          authResult <- Auth.resolveToken bareOpts backend
+          selfResult <- Self.resolveToken backend
+          authResult `shouldBe` Just jwt
+          selfResult `shouldBe` Just jwt
+          authResult `shouldBe` selfResult
+
+      it "Auth.resolveToken CLI flag still wins over the shared fallback" $
+        withIsolatedHome $ \_home -> do
+          let sd0 = Self.emptyStoredDefaults
+              sd  = sd0 { Self.sdCookies =
+                            Map.singleton "access_token"
+                              (Self.CredentialRef "literal:from-defaults-file") }
+          Self.writeDefaults backend sd
+          let optsWithFlag = bareOpts { optToken = Just "from-cli-flag" }
+          authResult <- Auth.resolveToken optsWithFlag backend
+          selfResult <- Self.resolveToken backend
+          authResult `shouldBe` Just "from-cli-flag"
+          selfResult `shouldBe` Just "from-defaults-file"
 
     -- ═══════════════════════════════════════════
     -- Section 12: Watch utilities (pure)

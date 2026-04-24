@@ -16,6 +16,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Options.Applicative
 
+import qualified Synapse.Self.Command as SelfCmd
+
 import SynapseCC.Types
 
 -- ============================================================================
@@ -70,6 +72,8 @@ commandParser = subparser
       (progDesc "Block until all configured backends are reachable"))
  <> command "init"  (info initCommandParser
       (progDesc "Scaffold a synapse.config.json in the current directory"))
+ <> command "_self" (info (CmdSelf <$> SelfCmd.parseSelfCommand)
+      (progDesc "Manage per-backend defaults (cookies, headers, credentials)"))
   )
 
 buildCommandParser :: Parser Command

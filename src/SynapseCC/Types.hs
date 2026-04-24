@@ -67,6 +67,7 @@ import qualified Data.Text as T
 import Data.Version (showVersion)
 import GHC.Generics (Generic)
 import Paths_synapse_cc (version)
+import Synapse.Self.Command (SelfCommand)
 import System.FilePath (FilePath)
 
 -- ============================================================================
@@ -295,6 +296,12 @@ defaultSynapseConfig = SynapseConfig
 -- ============================================================================
 
 -- | Top-level CLI command
+--
+-- @CmdSelf@ (SELF-6) wraps the shared 'Synapse.Self.Command.SelfCommand'
+-- surface so @synapse-cc _self@ dispatches through the same handler as
+-- @synapse _self@. The payload is kept as an opaque dynamic here
+-- (@!SelfCommand@) rather than pattern-matched by synapse-cc itself —
+-- the dispatcher in @app\/Main.hs@ only calls 'runSelfCommand'.
 data Command
   = CmdBuild Config         -- ^ Build with explicit target/backend (CLI args)
   | CmdBuildFromConfig      -- ^ Build all targets from synapse.config.json
@@ -302,6 +309,7 @@ data Command
   | CmdWatch WatchArgs      -- ^ Watch mode
   | CmdWait WaitArgs        -- ^ Wait for backends to become reachable
   | CmdInit                 -- ^ Scaffold synapse.config.json
+  | CmdSelf SelfCommand     -- ^ @_self@ — see "Synapse.Self.Command"
   deriving stock (Show, Eq)
 
 -- | Arguments for the watch subcommand
