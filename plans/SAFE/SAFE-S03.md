@@ -1,7 +1,7 @@
 ---
 id: SAFE-S03
 title: "Deduplicate resolveToken between synapse and synapse-cc"
-status: Pending
+status: Complete
 type: implementation
 blocked_by: []
 unlocks: []
@@ -47,3 +47,21 @@ Move `resolveToken` (and any helpers it uses) from `synapse/app/Main.hs` into a 
 ## Completion
 
 Lands after both SAFE-2 and REQ-5 are Complete (so the priority chain is stable). Implementor moves the function, updates both call sites, runs both tools' test suites.
+
+## Verdict (2026-04-24)
+
+**Complete — closed by SELF-6.**
+
+SELF-3 auto-migrated `~/.plexus/tokens/<backend>` to `~/.plexus/<backend>/defaults.json` and collapsed the synapse-cc token reader's legacy path onto `Synapse.Self.loadDefaults`. SELF-6 finished the job: the shared library now exposes `Synapse.Self.resolveToken` (sugar over `loadDefaults` + `defaultRegistry` + `resolveRef`), and `SynapseCC.Auth.resolveToken` is reduced to an Options-aware priority chain whose final fallback is a one-line delegation to `Self.resolveToken`. The synapse executable keeps its own loud `buildEnv` path for the same helper.
+
+Why option (b) (thin wrapper) instead of outright deletion: `SynapseCC.Auth.resolveToken` takes a synapse-cc-local `Options` record and implements the CLI-priority chain (`--token` > `SYNAPSE_TOKEN` > `--token-file` > defaults-store). The Options-dependent chain is CLI surface, not library logic; keeping it in synapse-cc lets the library-visible fallback (step 4) live in one place without dragging `Options` into the library.
+
+Grep enforcement passes:
+- `git grep 'plexus/tokens' -- src/ app/` → no hits in synapse-cc source
+- `git grep 'resolveToken' -- src/ app/` → `Auth.resolveToken` (the Options wrapper) and call sites only; no independent resolver chains
+
+Behavior parity verified:
+- `HOME=/tmp/self6smoke synapse-cc _self testbk set cookie access_token "literal:<jwt>"` then `HOME=/tmp/self6smoke synapse _self testbk show` renders the same JWT summary from the same `defaults.json`.
+- Unit dedup: `SELF-6 resolveToken dedup` tests in `synapse-cc/test/Main.hs` pin `Auth.resolveToken` (no CLI flags) ≡ `Self.resolveToken` for the same HOME.
+
+Tests: plexus-synapse:self-test 111/111 green; synapse-cc-test baseline 12 pre-existing failures unchanged, 7 new SELF-6 tests added (all green).
