@@ -91,6 +91,31 @@ synapse-cc typescript substrate ws://localhost:4444 \
 synapse-cc typescript substrate ws://localhost:4444 --debug
 ```
 
+### Credentials & Headers
+
+synapse-cc shares a **single defaults store** with synapse at `~/.plexus/<backend>/defaults.json`. Any JWT, cookie, or header you set via either CLI is immediately visible to the other. The file holds credential-reference URIs (`literal:`, `env://`, `file://`, `keychain://`), resolved at request time.
+
+```bash
+# Inspect what's stored + decode any JWTs + flag expired tokens
+synapse-cc _self <backend> show
+
+# Store a JWT (auto-wrapped as literal:)
+synapse-cc _self <backend> set cookie access_token "eyJ..."
+
+# Store a reference to an env var (preferred in CI)
+synapse-cc _self <backend> set cookie access_token "env://MY_JWT"
+
+# Import a JWT file
+synapse-cc _self <backend> import-token ~/Downloads/jwt.txt
+
+# Clear all defaults for a backend
+synapse-cc _self <backend> clear --yes
+```
+
+The `_self` subcommand tree is identical to `synapse _self <backend> …` — they share the same library implementation. See synapse's README for the full verb list, URI scheme reference, and legacy `~/.plexus/tokens/<backend>` migration behavior.
+
+Per-invocation overrides: `--token <jwt>`, `SYNAPSE_TOKEN` env, `--token-file <path>`, `--cookie KEY=VALUE`, `--header KEY=VALUE` — all flow through the same priority chain as synapse, with CLI values winning over stored defaults per key.
+
 ## Architecture
 
 ```

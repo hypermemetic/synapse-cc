@@ -87,18 +87,11 @@ synapse-cc is the **unified compiler toolchain** that orchestrates the complete 
 
 ### Key Design Decisions
 
-**1. External Executables (Not Libraries)**
+**1. Hybrid: subprocess for hub-codegen, library for synapse**
 
-synapse-cc does NOT use synapse or hub-codegen as libraries. Instead, it:
-- Discovers binaries in standard locations
-- Calls them as subprocesses
-- Communicates via CLI arguments and JSON files
+`hub-codegen` is a separate Rust binary called as a subprocess — discovered in standard locations, communicated with via CLI arguments and JSON files. Independent development cycles, language flexibility.
 
-**Benefits**:
-- Independent development cycles
-- Language flexibility (Haskell, Rust, TypeScript, etc.)
-- Simpler dependency management
-- Tool composability
+`synapse` is consumed as a **Haskell library** (`plexus-synapse` in `build-depends`; `cabal.project` lists `../synapse` as a local package). synapse-cc imports `Synapse.Monad`, `Synapse.IR.Builder`, `Synapse.Log`, `Synapse.Backend.Discovery`, and `Synapse.Self` directly. This lets the two tools share the credentials store (`Synapse.Self`) and `_self` subcommand handlers without reinventing them. See "Credentials store" below.
 
 **2. Two-Level Caching**
 
@@ -174,6 +167,30 @@ Suggestions:
   - Install synapse: cabal install synapse
   - Add to PATH: export PATH="$HOME/.cabal/bin:$PATH"
 ```
+
+---
+
+## Credentials store
+
+Both synapse and synapse-cc share a per-backend defaults store at `~/.plexus/<backend>/defaults.json`. The file holds **credential-reference URIs** (`literal:`, `env://`, `file://`, `keychain://`); the actual secret material is never inlined unless the URI is `literal:`.
+
+**Shared implementation:** `Synapse.Self` in the `plexus-synapse` library. synapse-cc imports it directly — there's no duplicated resolver logic. `SynapseCC.Auth.resolveToken` is a thin CLI-priority-chain wrapper (`--token` > `SYNAPSE_TOKEN` > `--token-file` > stored defaults); its final fallback calls `Synapse.Self.resolveToken`.
+
+**`_self` subcommand:** `synapse-cc _self <backend> <verb>` dispatches to `Synapse.Self.Command.runSelfCommand` — the identical handler that `synapse _self` uses. Both CLIs see the same file, produce the same output. Users can set credentials via either.
+
+**Verbs** (see synapse/README.md for the full reference):
+- `show` — inspects state, decodes JWTs, flags expired tokens
+- `set cookie|header <name> <value-or-uri>` — auto-wraps bare values as `literal:`
+- `set-from-stdin cookie|header <name>` — explicit literal, bypasses scheme heuristic
+- `unset`, `clear`, `resolve`, `import-token`
+
+**Legacy migration:** on first read of a backend that has `~/.plexus/tokens/<backend>` (pre-SELF convention) but no `defaults.json`, `Synapse.Self.loadDefaults` auto-migrates the JWT as `cookies.access_token = literal:<jwt>` and deletes the legacy file. Emits an INFO log naming both paths.
+
+**File permissions:** `writeDefaults` applies content-aware chmod — `0600` when the file contains any `literal:` value, `0644` otherwise. Parent directory mode `0700` when freshly created.
+
+**Deferred: keychain resolver.** `keychain://` URIs parse and appear in `show`, but the resolver returns "keychain backend disabled pending SELF-8" — user-attended rollout required. `set-secret` / `upgrade-to-keychain` / `import-token --to-keychain` are stubbed with the same message. The store is fully functional via `literal:`, `env://`, `file://` today.
+
+Related tickets (all Complete except SELF-8): `synapse/plans/SELF/SELF-1..8.md`.
 
 ---
 
