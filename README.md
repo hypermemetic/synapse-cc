@@ -11,6 +11,7 @@
 - ⚡ **Fast**: Smart caching avoids regeneration when schemas haven't changed (coming in Phase 3)
 - 🎯 **Multi-Language**: TypeScript, Python, Rust support (TypeScript in MVP)
 - 🛠️ **Complete Pipeline**: From schema → IR → generated code → compiled artifacts
+- 🔐 **Credential lifecycle**: Per-backend defaults store shared with `synapse` — set, inspect, and rotate JWTs / cookies / headers via `synapse-cc _self <backend> …`. Values held as reference URIs (`literal:`, `env://`, `file://`, `keychain://`) so secrets live in the OS keychain or env vars, not plaintext. JWT decoding flags expired tokens at a glance.
 
 ## Installation
 
