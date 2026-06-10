@@ -165,7 +165,9 @@ installDependencies Python _ debug = do
   pure $ Right ()
 
 installDependencies Rust _ debug = do
-  when debug $ putStrLn "[*] Rust dependency installation not yet implemented (Phase 2 TODO)"
+  -- Z2H-7: no separate install step for Rust — the generated Cargo.toml
+  -- declares all dependencies and `cargo build` resolves them.
+  when debug $ putStrLn "[*] Rust dependencies are declared in the generated Cargo.toml — cargo build resolves them"
   pure $ Right ()
 
 -- | Add specific packages to the project using the detected package manager.
@@ -253,9 +255,29 @@ buildProject Python genPath debug = do
   when debug $ putStrLn "[*] Python build not yet implemented (Phase 2 TODO)"
   pure $ Right $ CompiledPath $ unGeneratedPath genPath
 
+-- Z2H-7: compile the generated Rust crate with `cargo build`.
+-- Incremental rebuilds are cargo's own concern (its target/ cache);
+-- synapse-cc's manifest/lock cache decides whether this step runs at all.
 buildProject Rust genPath debug = do
-  when debug $ putStrLn "[*] Rust build not yet implemented (Phase 2 TODO)"
-  pure $ Right $ CompiledPath $ unGeneratedPath genPath
+  when debug $ putStrLn $ "[*] Compiling Rust crate in " ++ unGeneratedPath genPath
+
+  mbCargo <- findExecutable "cargo"
+  case mbCargo of
+    Nothing -> pure $ Left $ ToolNotFound "cargo"
+      [ "Install Rust via rustup: https://rustup.rs"
+      , "Ensure cargo is on PATH: export PATH=\"$HOME/.cargo/bin:$PATH\""
+      ]
+    Just cargo -> do
+      result <- runProcess cargo ["build"] (Just $ unGeneratedPath genPath) debug
+      case prExitCode result of
+        ExitSuccess -> do
+          when debug $ putStrLn "  [+] cargo build passed"
+          pure $ Right $ CompiledPath $ unGeneratedPath genPath
+        ExitFailure code -> do
+          -- cargo writes diagnostics to stderr; keep stdout too in case of
+          -- build-script output. These must reach the user verbatim.
+          let combined = T.unlines $ filter (not . T.null . T.strip) [prStdout result, prStderr result]
+          pure $ Left $ LanguageToolError "cargo build" combined code
 
 -- ============================================================================
 -- Testing

@@ -53,6 +53,7 @@ import SynapseCC.Detect
   , inferBackendFromCrate, parseServiceCrateName
   )
 import SynapseCC.Discover (discoverTools)
+import qualified SynapseCC.Language as Language
 import SynapseCC.Merge (additiveMerge)
 import SynapseCC.Pipeline (runPipeline)
 import SynapseCC.Types
@@ -61,6 +62,7 @@ import SynapseCC.Types
   , WatchArgs(..), Command(..)
   , defaultSynapseConfig
   , TransportType(..)
+  , SynapseCCError(..), GeneratedPath(..)
   )
 import SynapseCC.Watch
   ( matchesAnyPrefix, parseUrl, extractPluginHashesFromBytes
@@ -1551,6 +1553,60 @@ main = do
             [ "[package]", "version = \"0.1.0\""
             , "[dependencies]", "plexus-core = \"1.0\""
             ]) `shouldBe` Nothing
+
+    -- ═══════════════════════════════════════════
+    -- Z2H-7: Rust compile step (Language.buildProject Rust)
+    -- ═══════════════════════════════════════════
+    describe "Z2H-7 Rust compile step" $ do
+
+      let withTempCrate :: String -> [(FilePath, String)] -> (FilePath -> IO a) -> IO a
+          withTempCrate name files action = do
+            tmpBase <- getTemporaryDirectory
+            let dir' = tmpBase </> name
+            exists <- doesDirectoryExist dir'
+            when exists $ removeDirectoryRecursive dir'
+            createDirectoryIfMissing True (dir' </> "src")
+            forM_ files $ \(rel, content) -> writeFile (dir' </> rel) content
+            action dir'
+
+          minimalCargoToml = unlines
+            [ "[package]"
+            , "name = \"z2h7-test-crate\""
+            , "version = \"0.1.0\""
+            , "edition = \"2021\""
+            , ""
+            , "[dependencies]"
+            ]
+
+      it "cargo build of a valid generated-style crate succeeds" $ do
+        cargoAvail <- findExecutable "cargo"
+        case cargoAvail of
+          Nothing -> pendingWith "cargo not found on PATH"
+          Just _ -> withTempCrate "synapse-cc-z2h7-green"
+            [ ("Cargo.toml", minimalCargoToml)
+            , ("src/lib.rs", "pub fn answer() -> i32 { 42 }\n")
+            ] $ \dir' -> do
+              result <- Language.buildProject Rust (GeneratedPath dir') False
+              case result of
+                Left err -> expectationFailure $ T.unpack (formatError err)
+                Right _  -> pure ()
+
+      it "cargo build failure surfaces as LanguageToolError with cargo diagnostics" $ do
+        cargoAvail <- findExecutable "cargo"
+        case cargoAvail of
+          Nothing -> pendingWith "cargo not found on PATH"
+          Just _ -> withTempCrate "synapse-cc-z2h7-red"
+            [ ("Cargo.toml", minimalCargoToml)
+            , ("src/lib.rs", "pub fn broken( -> {\n")
+            ] $ \dir' -> do
+              result <- Language.buildProject Rust (GeneratedPath dir') False
+              case result of
+                Right _ -> expectationFailure "expected cargo build to fail"
+                Left (LanguageToolError tool output _code) -> do
+                  tool `shouldBe` "cargo build"
+                  -- cargo diagnostics must reach the pipeline error verbatim
+                  output `shouldSatisfy` T.isInfixOf "error"
+                Left other -> expectationFailure $ "unexpected error variant: " <> show other
 
     -- ═══════════════════════════════════════════
     -- Section 14: Standalone config-driven build

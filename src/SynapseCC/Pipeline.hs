@@ -241,7 +241,12 @@ runFullPipeline config tools = do
               outPkgJsonPath = outputDir </> "package.json"
           outPkgExists <- doesFileExist outPkgJsonPath
           isIntegration <-
-            if outPkgExists
+            if cfgTarget config /= TypeScript
+              -- Z2H-7: integration mode is a TypeScript (package.json) concept.
+              -- A Rust target emits a standalone crate; a package.json in the
+              -- CWD must not suppress the cargo build step.
+              then pure False
+            else if outPkgExists
               then do
                 -- outputDir has a package.json — if it has _generatedBy it's ours (standalone)
                 content <- TIO.readFile outPkgJsonPath
@@ -303,10 +308,12 @@ runFullPipeline config tools = do
 
           let genPath = GeneratedPath outputDir
 
-          -- Write synapse-cc's tsconfig to the output dir.
+          -- Write synapse-cc's tsconfig to the output dir (TypeScript only —
+          -- a generated Rust crate has no business containing a tsconfig).
           -- Standalone mode: tight config (noEmit, transport-specific types).
           -- Integration mode: project-references config (composite, declaration).
-          do logDebug debug "  Writing tsconfig.json"
+          when (cfgTarget config == TypeScript) $ do
+             logDebug debug "  Writing tsconfig.json"
              let tsconfig = if isIntegration
                               then generateIntegrationTsconfig
                               else generateTsconfig (optTransport opts)
@@ -318,7 +325,7 @@ runFullPipeline config tools = do
           let depsToAdd    = coDependencies out
               devDepsToAdd = if isIntegration then Map.empty else coDevDependencies out
               depPath      = if isIntegration then pmPath else genPath
-          (installResult, installMs) <- if optInstallDeps opts
+          (installResult, installMs) <- if optInstallDeps opts && cfgTarget config == TypeScript
             then do
               (addResult, addMs) <- timeStep $ Language.addDependencies
                 depPath
@@ -342,7 +349,11 @@ runFullPipeline config tools = do
                         Left _   -> pure ()
                       pure (result, addMs + ms)
             else do
-              logDebug debug "Skipping dependency installation (--no-install)"
+              if cfgTarget config == TypeScript
+                then logDebug debug "Skipping dependency installation (--no-install)"
+                -- Z2H-7: no package-manager step for Rust — dependencies live
+                -- in the generated Cargo.toml and cargo build resolves them.
+                else logDebug debug "Dependencies declared in generated Cargo.toml (resolved by cargo build)"
               pure (Right (), 0)
 
           case installResult of
