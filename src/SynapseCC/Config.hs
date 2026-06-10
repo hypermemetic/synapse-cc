@@ -5,6 +5,7 @@ module SynapseCC.Config
   ( loadSynapseConfig
   , validateSynapseConfig
   , initSynapseConfig
+  , InitResult(..)
   , synapseConfigPath
 
     -- * Shared config-to-runtime conversions
@@ -22,7 +23,10 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import System.Directory (doesFileExist)
 
-import SynapseCC.Detect (Detector, ProjectHint(..), runDetectors)
+import SynapseCC.Detect
+  ( Detector, ProjectHint(..), runDetectors
+  , BackendInference(..), InferenceOutcome(..), inferBackend
+  )
 import SynapseCC.Types
 
 -- | Standard config file name (looked up from CWD)
@@ -147,25 +151,66 @@ buildConfigFromTarget opts sc tc =
        , cfgPlugins = tcPlugins tc
        }
 
+-- | Result of a successful @synapse-cc init@.
+data InitResult = InitResult
+  { irHint        :: !ProjectHint   -- ^ Transport detection result ('phReason' explains)
+  , irBackend     :: !Text          -- ^ Backend name written into the config
+  , irBackendNote :: !(Maybe Text)  -- ^ Announcement when the backend was INFERRED
+                                    --   (Nothing when given explicitly)
+  } deriving (Show, Eq)
+
 -- | Scaffold a synapse.config.json, using 'detectors' to infer the right
 -- transport and other settings for the current project.
 --
--- Returns @Left@ if the file already exists.
--- Returns @Right hint@ on success — the caller can inspect 'phReason' to
--- print a message explaining what was detected.
+-- Z2H-5: the backend name is either given explicitly (@Just backend@) or
+-- inferred via 'inferBackend' (co-located service crate, then local
+-- registry at @regHost:regPort@). There is no hardcoded fallback — when
+-- nothing is inferable the result is a @Left@ naming the missing argument.
+--
+-- Returns @Left@ if the file already exists or no backend could be
+-- determined. Returns @Right InitResult@ on success — 'irBackendNote'
+-- carries the inference announcement the caller MUST surface.
 --
 -- Pass 'SynapseCC.Detect.defaultDetectors' for the standard set, or prepend
 -- additional detectors for project-specific overrides.
-initSynapseConfig :: FilePath -> [Detector] -> IO (Either Text ProjectHint)
-initSynapseConfig path detectors = do
+initSynapseConfig
+  :: FilePath      -- ^ Config path (usually 'synapseConfigPath')
+  -> [Detector]    -- ^ Transport detectors
+  -> Maybe Text    -- ^ Explicit backend name (Nothing = infer)
+  -> Text          -- ^ Registry host for inference (default "127.0.0.1")
+  -> Int           -- ^ Registry port for inference (default 4444)
+  -> IO (Either Text InitResult)
+initSynapseConfig path detectors mBackend regHost regPort = do
   exists <- doesFileExist path
   if exists
     then pure $ Left $ T.pack path <> " already exists"
     else do
-      hint <- runDetectors detectors
-      let config = applyHint hint defaultSynapseConfig
-      BL.writeFile path (Pretty.encodePretty' prettyConfig config)
-      pure $ Right hint
+      backendResult <- case mBackend of
+        Just b  -> pure $ Right (b, Nothing)
+        Nothing -> do
+          outcome <- inferBackend regHost regPort
+          pure $ case outcome of
+            Inferred bi -> Right (biBackend bi, Just (biReason bi))
+            AmbiguousRegistry known -> Left $
+              "missing BACKEND argument — multiple backends are registered ("
+              <> T.intercalate ", " known
+              <> "). Pick one: synapse-cc init <backend>"
+            NoInference -> Left $
+              "missing BACKEND argument — no co-located Plexus service crate found"
+              <> " and no backend discoverable on the registry at "
+              <> regHost <> ":" <> T.pack (show regPort)
+              <> ". Run: synapse-cc init <backend>"
+      case backendResult of
+        Left err -> pure $ Left err
+        Right (backend, note) -> do
+          hint <- runDetectors detectors
+          let config = applyHint hint (defaultSynapseConfig backend)
+          BL.writeFile path (Pretty.encodePretty' prettyConfig config)
+          pure $ Right InitResult
+            { irHint        = hint
+            , irBackend     = backend
+            , irBackendNote = note
+            }
 
 -- | Apply detected hints to the default config.
 applyHint :: ProjectHint -> SynapseConfig -> SynapseConfig

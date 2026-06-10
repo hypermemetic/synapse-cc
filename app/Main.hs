@@ -9,7 +9,7 @@ import System.IO (stdout, stderr, hSetEncoding, hSetBuffering, utf8, BufferMode(
 import qualified Synapse.Self.Command as SelfCmd
 
 import SynapseCC.CLI
-import SynapseCC.Config (initSynapseConfig, loadSynapseConfig, synapseConfigPath)
+import SynapseCC.Config (initSynapseConfig, InitResult(..), loadSynapseConfig, synapseConfigPath)
 import SynapseCC.Detect (ProjectHint(..), defaultDetectors)
 import SynapseCC.Discover
 import SynapseCC.Logging
@@ -36,17 +36,24 @@ main = do
     -- ------------------------------------------------------------------
     -- synapse-cc init
     -- ------------------------------------------------------------------
-    CmdInit -> do
-      result <- initSynapseConfig synapseConfigPath defaultDetectors
+    CmdInit mBackend -> do
+      -- Z2H-5: explicit backend wins; otherwise infer (co-located service
+      -- crate, then local registry at 127.0.0.1:4444). Never a silent default.
+      result <- initSynapseConfig synapseConfigPath defaultDetectors mBackend "127.0.0.1" 4444
       case result of
         Left err -> do
           TIO.putStrLn $ "[!] " <> err
           exitFailure
-        Right hint -> do
+        Right initResult -> do
           logSuccess $ "Created " <> T.pack synapseConfigPath
+                    <> " (backend: " <> irBackend initResult <> ")"
+          -- If the backend was inferred (not given explicitly), SAY SO.
+          case irBackendNote initResult of
+            Just note -> logInfo note
+            Nothing   -> pure ()
           -- If a detector gave a reason, surface it so the user knows
           -- why the generated config has a particular transport.
-          case phReason hint of
+          case phReason (irHint initResult) of
             Just reason -> logInfo reason
             Nothing     -> pure ()
           TIO.putStrLn "Edit it to configure your targets, then run:"

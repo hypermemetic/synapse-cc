@@ -141,8 +141,15 @@ waitCommandParser = fmap CmdWait $ WaitArgs
         )
   <*> switch (long "debug" <> help "Enable debug logging")
 
+-- | Z2H-5: @init@ takes an optional BACKEND argument. When omitted, the
+-- backend is inferred (co-located service crate, then local registry) —
+-- and the inference is announced. There is no hardcoded default.
 initCommandParser :: Parser Command
-initCommandParser = pure CmdInit
+initCommandParser = CmdInit
+  <$> optional (T.pack <$> argument str
+        ( metavar "BACKEND"
+       <> help "Backend identifier to scaffold for (omit to infer from a co-located service crate or the local registry)"
+        ))
 
 -- | Options relevant to watch mode.
 -- host/port come from synapse.config.json (not CLI flags for watch).

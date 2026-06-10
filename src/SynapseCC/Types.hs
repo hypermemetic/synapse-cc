@@ -267,11 +267,14 @@ instance ToJSON SynapseConfig where
     , Just $ "targets"        Aeson..= scTargets sc
     ]
 
-defaultSynapseConfig :: SynapseConfig
-defaultSynapseConfig = SynapseConfig
+-- | Scaffold template for synapse.config.json, parameterised by backend name.
+-- Z2H-5: there is deliberately NO zero-argument default — the backend must be
+-- supplied explicitly or inferred (see 'SynapseCC.Detect.inferBackend').
+defaultSynapseConfig :: Text -> SynapseConfig
+defaultSynapseConfig backend = SynapseConfig
   { scSchema         = "1.0"
   , scLanguage       = "typescript"
-  , scBackend        = Just "substrate"
+  , scBackend        = Just backend
   , scUrl            = Just "ws://127.0.0.1:4444"
   , scPackageManager = "bun"
   , scWatch          = defaultWatchConfig
@@ -308,7 +311,7 @@ data Command
       Options               -- ^ CLI flags that override per-target config
   | CmdWatch WatchArgs      -- ^ Watch mode
   | CmdWait WaitArgs        -- ^ Wait for backends to become reachable
-  | CmdInit                 -- ^ Scaffold synapse.config.json
+  | CmdInit !(Maybe Text)   -- ^ Scaffold synapse.config.json (Z2H-5: optional explicit backend; Nothing = infer)
   | CmdSelf SelfCommand     -- ^ @_self@ — see "Synapse.Self.Command"
   deriving stock (Show, Eq)
 

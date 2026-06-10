@@ -388,7 +388,7 @@ filterTargets watchArgs allTargets =
 -- | Synthesize a SynapseConfig from CLI args alone (no config file)
 synapseConfigFromArgs :: WatchArgs -> SynapseConfig
 synapseConfigFromArgs watchArgs =
-  defaultSynapseConfig { scBackend = Just (waBackend watchArgs) }
+  defaultSynapseConfig (waBackend watchArgs)
 
 -- | Parse host and port from a WebSocket URL. Alias for 'Config.parseWsUrl'.
 parseUrl :: Text -> (Text, Text)

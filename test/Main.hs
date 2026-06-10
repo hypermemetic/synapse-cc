@@ -44,11 +44,13 @@ import Plexus.Client (SubstrateConfig(..), defaultConfig)
 import qualified Plexus.Transport as Transport
 import Plexus.Types (TransportError(..), PlexusStreamItem)
 import SynapseCC.CLI (synapseCCParserInfo, synapseCCCommandParserInfo)
-import SynapseCC.Config (loadSynapseConfig, validateSynapseConfig, initSynapseConfig, synapseConfigPath)
+import SynapseCC.Config (loadSynapseConfig, validateSynapseConfig, initSynapseConfig, InitResult(..), synapseConfigPath)
 import SynapseCC.Detect
   ( ProjectHint(..), Detector(..), emptyHint
   , runDetectors, defaultDetectors
   , detectTauri, detectVite, detectNextJS, detectNodeProject
+  , BackendInference(..)
+  , inferBackendFromCrate, parseServiceCrateName
   )
 import SynapseCC.Discover (discoverTools)
 import SynapseCC.Merge (additiveMerge)
@@ -65,6 +67,20 @@ import SynapseCC.Watch
   , filterTargets, buildConfigFromTarget
   , fetchBackendHash
   )
+
+-- | Sample scaffold config for tests. The backend name here is arbitrary
+-- test data — Z2H-5 removed the zero-argument default from the init path,
+-- so tests must construct their sample explicitly.
+testSynapseConfig :: SynapseConfig
+testSynapseConfig = defaultSynapseConfig "substrate"
+
+-- | Registry coordinates guaranteed dead for init/inference tests
+-- (discard port — connection refused immediately, never inferable).
+deadRegistryHost :: Text
+deadRegistryHost = "127.0.0.1"
+
+deadRegistryPort :: Int
+deadRegistryPort = 9
 
 -- | Shared test context: the path to generated output
 data TestEnv = TestEnv
@@ -778,7 +794,7 @@ main = do
           when tmpExists $ removeDirectoryRecursive dir'
           createDirectoryIfMissing True dir'
           -- Pass [] — no detectors, so defaults apply regardless of test environment
-          result <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath []
+          result <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath [] (Just "demo") deadRegistryHost deadRegistryPort
           result `shouldSatisfy` isRight
           exists <- doesFileExist (dir' </> synapseConfigPath)
           exists `shouldBe` True
@@ -788,7 +804,7 @@ main = do
           let dir' = tmpBase </> "synapse-cc-init-exists-test"
           createDirectoryIfMissing True dir'
           writeFile (dir' </> synapseConfigPath) "{}"
-          result <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath []
+          result <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath [] (Just "demo") deadRegistryHost deadRegistryPort
           result `shouldSatisfy` isLeft
 
         it "created file round-trips through loadSynapseConfig" $ do
@@ -797,7 +813,7 @@ main = do
           tmpExists <- doesDirectoryExist dir'
           when tmpExists $ removeDirectoryRecursive dir'
           createDirectoryIfMissing True dir'
-          _ <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath []
+          _ <- withCurrentDirectory dir' $ initSynapseConfig synapseConfigPath [] (Just "demo") deadRegistryHost deadRegistryPort
           result <- withCurrentDirectory dir' loadSynapseConfig
           result `shouldSatisfy` isRight
 
@@ -834,19 +850,19 @@ main = do
                 Just cfg -> Map.size (scTargets (cfg :: SynapseConfig)) `shouldBe` 2
 
       describe "validateSynapseConfig" $ do
-        it "accepts defaultSynapseConfig" $
-          validateSynapseConfig defaultSynapseConfig `shouldBe` Right ()
+        it "accepts testSynapseConfig" $
+          validateSynapseConfig testSynapseConfig `shouldBe` Right ()
 
         it "rejects empty backend" $
-          validateSynapseConfig (defaultSynapseConfig { scBackend = Just "" })
+          validateSynapseConfig (testSynapseConfig { scBackend = Just "" })
             `shouldSatisfy` isLeft
 
         it "rejects whitespace-only backend" $
-          validateSynapseConfig (defaultSynapseConfig { scBackend = Just "   " })
+          validateSynapseConfig (testSynapseConfig { scBackend = Just "   " })
             `shouldSatisfy` isLeft
 
         it "rejects empty targets map" $
-          validateSynapseConfig (defaultSynapseConfig { scTargets = Map.empty })
+          validateSynapseConfig (testSynapseConfig { scTargets = Map.empty })
             `shouldSatisfy` isLeft
 
         it "rejects target with empty generate list" $ do
@@ -860,7 +876,7 @@ main = do
                 , tcPlugins         = Nothing
                 , tcSharedTransport = Nothing
                 }
-          let cfg = defaultSynapseConfig { scTargets = Map.singleton "t" badTarget }
+          let cfg = testSynapseConfig { scTargets = Map.singleton "t" badTarget }
           validateSynapseConfig cfg `shouldSatisfy` isLeft
 
         it "rejects target with empty outputDir" $ do
@@ -874,12 +890,12 @@ main = do
                 , tcPlugins         = Nothing
                 , tcSharedTransport = Nothing
                 }
-          let cfg = defaultSynapseConfig { scTargets = Map.singleton "t" badTarget }
+          let cfg = testSynapseConfig { scTargets = Map.singleton "t" badTarget }
           validateSynapseConfig cfg `shouldSatisfy` isLeft
 
       describe "JSON round-trip" $ do
         it "encode/decode SynapseConfig preserves data" $ do
-          let cfg = defaultSynapseConfig
+          let cfg = testSynapseConfig
           case Aeson.decode (Aeson.encode cfg) of
             Nothing      -> expectationFailure "Failed to decode encoded SynapseConfig"
             Just decoded -> scBackend (decoded :: SynapseConfig) `shouldBe` scBackend cfg
@@ -985,8 +1001,13 @@ main = do
 
         it "produces CmdInit" $ do
           case parse ["init"] of
-            Just CmdInit -> pure ()
-            other -> expectationFailure $ "Expected CmdInit, got: " ++ show other
+            Just (CmdInit Nothing) -> pure ()
+            other -> expectationFailure $ "Expected CmdInit Nothing, got: " ++ show other
+
+        it "parses 'init demo' with explicit backend" $ do
+          case parse ["init", "demo"] of
+            Just (CmdInit (Just b)) -> b `shouldBe` "demo"
+            other -> expectationFailure $ "Expected CmdInit (Just \"demo\"), got: " ++ show other
 
       -- SELF-6: `_self` subcommand. synapse-cc's job is to parse the
       -- invocation and hand the resulting SelfCommand to the shared
@@ -1179,28 +1200,28 @@ main = do
       describe "buildConfigFromTarget" $ do
         it "sets outputDir from target" $ do
           let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
-          let sc  = defaultSynapseConfig { scUrl = Just "ws://localhost:4444" }
+          let sc  = testSynapseConfig { scUrl = Just "ws://localhost:4444" }
           let tc  = TargetConfig ["plugins"] BrowserTransport "my/output/dir" Nothing Nothing Nothing Nothing Nothing
           let cfg = buildConfigFromTarget wa sc tc
           optOutput (cfgOptions cfg) `shouldBe` "my/output/dir"
 
         it "sets transport from target" $ do
           let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
-          let sc  = defaultSynapseConfig
+          let sc  = testSynapseConfig
           let tc  = TargetConfig ["plugins"] BrowserTransport "out" Nothing Nothing Nothing Nothing Nothing
           let cfg = buildConfigFromTarget wa sc tc
           optTransport (cfgOptions cfg) `shouldBe` BrowserTransport
 
         it "parses host from URL" $ do
           let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
-          let sc  = defaultSynapseConfig { scUrl = Just "ws://myhost:9000" }
+          let sc  = testSynapseConfig { scUrl = Just "ws://myhost:9000" }
           let tc  = TargetConfig ["plugins"] WsTransport "out" Nothing Nothing Nothing Nothing Nothing
           let cfg = buildConfigFromTarget wa sc tc
           cfgHost cfg `shouldBe` "myhost"
 
         it "parses port from URL" $ do
           let wa  = WatchArgs "substrate" [] Nothing Nothing defaultOptions
-          let sc  = defaultSynapseConfig { scUrl = Just "ws://localhost:9000" }
+          let sc  = testSynapseConfig { scUrl = Just "ws://localhost:9000" }
           let tc  = TargetConfig ["plugins"] WsTransport "out" Nothing Nothing Nothing Nothing Nothing
           let cfg = buildConfigFromTarget wa sc tc
           cfgPort cfg `shouldBe` "9000"
@@ -1346,7 +1367,7 @@ main = do
           withTempProject $ \dir -> do
             createDirectoryIfMissing True (dir </> "src-tauri")
             hint <- withCurrentDirectory dir $
-              initSynapseConfig synapseConfigPath defaultDetectors
+              initSynapseConfig synapseConfigPath defaultDetectors (Just "demo") deadRegistryHost deadRegistryPort
             hint `shouldSatisfy` isRight
             cfgResult <- withCurrentDirectory dir loadSynapseConfig
             case cfgResult of
@@ -1359,7 +1380,7 @@ main = do
           withTempProject $ \dir -> do
             writeFile (dir </> "vite.config.ts") "export default {}"
             hint <- withCurrentDirectory dir $
-              initSynapseConfig synapseConfigPath defaultDetectors
+              initSynapseConfig synapseConfigPath defaultDetectors (Just "demo") deadRegistryHost deadRegistryPort
             hint `shouldSatisfy` isRight
             cfgResult <- withCurrentDirectory dir loadSynapseConfig
             case cfgResult of
@@ -1372,7 +1393,7 @@ main = do
           withTempProject $ \dir -> do
             writeFile (dir </> "package.json") "{}"
             hint <- withCurrentDirectory dir $
-              initSynapseConfig synapseConfigPath defaultDetectors
+              initSynapseConfig synapseConfigPath defaultDetectors (Just "demo") deadRegistryHost deadRegistryPort
             hint `shouldSatisfy` isRight
             cfgResult <- withCurrentDirectory dir loadSynapseConfig
             case cfgResult of
@@ -1384,13 +1405,13 @@ main = do
         it "empty project → generated config has ws transport (default)" $ do
           withTempProject $ \dir -> do
             hint <- withCurrentDirectory dir $
-              initSynapseConfig synapseConfigPath defaultDetectors
+              initSynapseConfig synapseConfigPath defaultDetectors (Just "demo") deadRegistryHost deadRegistryPort
             hint `shouldSatisfy` isRight
             cfgResult <- withCurrentDirectory dir loadSynapseConfig
             case cfgResult of
               Left err -> expectationFailure $ "loadSynapseConfig failed: " <> T.unpack err
               Right sc -> do
-                -- No detector fired → no hint → default transport (WsTransport from defaultSynapseConfig)
+                -- No detector fired → no hint → default transport (WsTransport from testSynapseConfig)
                 let transports = map tcTransport (Map.elems (scTargets sc))
                 transports `shouldSatisfy` (not . null)
 
@@ -1398,10 +1419,138 @@ main = do
           withTempProject $ \dir -> do
             createDirectoryIfMissing True (dir </> "src-tauri")
             result <- withCurrentDirectory dir $
-              initSynapseConfig synapseConfigPath defaultDetectors
+              initSynapseConfig synapseConfigPath defaultDetectors (Just "demo") deadRegistryHost deadRegistryPort
             case result of
               Left err -> expectationFailure $ "Expected Right but got Left: " <> T.unpack err
-              Right hint -> phReason hint `shouldSatisfy` isJust
+              Right ir -> phReason (irHint ir) `shouldSatisfy` isJust
+
+    -- ═══════════════════════════════════════════
+    -- Z2H-5: init backend naming / inference / error
+    -- ═══════════════════════════════════════════
+    describe "Z2H-5 init backend resolution" $ do
+
+      let withTempInitDir :: String -> (FilePath -> IO a) -> IO a
+          withTempInitDir name action = do
+            tmpBase <- getTemporaryDirectory
+            let dir' = tmpBase </> name
+            exists <- doesDirectoryExist dir'
+            when exists $ removeDirectoryRecursive dir'
+            createDirectoryIfMissing True dir'
+            action dir'
+
+      it "explicit backend: init demo writes backend \"demo\"" $ do
+        withTempInitDir "synapse-cc-z2h5-explicit" $ \dir' -> do
+          result <- withCurrentDirectory dir' $
+            initSynapseConfig synapseConfigPath [] (Just "demo") deadRegistryHost deadRegistryPort
+          case result of
+            Left err -> expectationFailure (T.unpack err)
+            Right ir -> do
+              irBackend ir `shouldBe` "demo"
+              irBackendNote ir `shouldBe` Nothing  -- explicit, nothing to announce
+          cfgResult <- withCurrentDirectory dir' loadSynapseConfig
+          case cfgResult of
+            Left err -> expectationFailure (T.unpack err)
+            Right sc -> scBackend sc `shouldBe` Just "demo"
+
+      it "inference: co-located service crate names the backend AND announces it" $ do
+        withTempInitDir "synapse-cc-z2h5-crate" $ \dir' -> do
+          writeFile (dir' </> "Cargo.toml") $ unlines
+            [ "[package]"
+            , "name = \"my-cool-service\""
+            , "version = \"0.1.0\""
+            , ""
+            , "[dependencies]"
+            , "plexus-core = { path = \"../plexus-core\" }"
+            ]
+          result <- withCurrentDirectory dir' $
+            initSynapseConfig synapseConfigPath [] Nothing deadRegistryHost deadRegistryPort
+          case result of
+            Left err -> expectationFailure (T.unpack err)
+            Right ir -> do
+              irBackend ir `shouldBe` "my-cool-service"
+              -- Inference MUST be announced (never silent)
+              case irBackendNote ir of
+                Nothing   -> expectationFailure "expected an inference announcement"
+                Just note -> note `shouldSatisfy` T.isInfixOf "my-cool-service"
+          cfgResult <- withCurrentDirectory dir' loadSynapseConfig
+          case cfgResult of
+            Left err -> expectationFailure (T.unpack err)
+            Right sc -> scBackend sc `shouldBe` Just "my-cool-service"
+
+      it "nothing inferable: clear error naming the missing BACKEND argument, no file written" $ do
+        withTempInitDir "synapse-cc-z2h5-nothing" $ \dir' -> do
+          result <- withCurrentDirectory dir' $
+            initSynapseConfig synapseConfigPath [] Nothing deadRegistryHost deadRegistryPort
+          case result of
+            Right ir -> expectationFailure $
+              "expected an error, but init picked backend: " <> T.unpack (irBackend ir)
+            Left err -> do
+              err `shouldSatisfy` T.isInfixOf "BACKEND"
+              err `shouldSatisfy` T.isInfixOf "synapse-cc init"
+          exists <- doesFileExist (dir' </> synapseConfigPath)
+          exists `shouldBe` False
+
+      describe "inferBackendFromCrate" $ do
+        it "finds a service crate Cargo.toml in the parent directory" $ do
+          withTempInitDir "synapse-cc-z2h5-parent" $ \dir' -> do
+            writeFile (dir' </> "Cargo.toml") $ unlines
+              [ "[package]"
+              , "name = \"parent-service\""
+              , "[dependencies]"
+              , "plexus-transport = { path = \"../plexus-transport\" }"
+              ]
+            let sub = dir' </> "nested"
+            createDirectoryIfMissing True sub
+            result <- inferBackendFromCrate sub
+            fmap biBackend result `shouldBe` Just "parent-service"
+
+        it "returns Nothing for a non-service crate" $ do
+          withTempInitDir "synapse-cc-z2h5-nonservice" $ \dir' -> do
+            writeFile (dir' </> "Cargo.toml") $ unlines
+              [ "[package]"
+              , "name = \"just-a-crate\""
+              , "[dependencies]"
+              , "serde = \"1.0\""
+              ]
+            result <- inferBackendFromCrate dir'
+            result `shouldBe` Nothing
+
+      describe "parseServiceCrateName" $ do
+        it "accepts a crate depending on plexus-core" $
+          parseServiceCrateName (T.unlines
+            [ "[package]", "name = \"fidget-spinner\"", "version = \"0.1.0\""
+            , "[dependencies]", "serde = \"1.0\"", "plexus-core = { path = \"../plexus-core\" }"
+            ]) `shouldBe` Just "fidget-spinner"
+
+        it "accepts a crate depending on plexus-rpc" $
+          parseServiceCrateName (T.unlines
+            [ "[package]", "name = \"svc\""
+            , "[dependencies]", "plexus-rpc = \"0.3\""
+            ]) `shouldBe` Just "svc"
+
+        it "accepts table-form dependency [dependencies.plexus-rpc]" $
+          parseServiceCrateName (T.unlines
+            [ "[package]", "name = \"svc-table\""
+            , "[dependencies.plexus-rpc]", "version = \"0.3\""
+            ]) `shouldBe` Just "svc-table"
+
+        it "rejects a crate with no plexus dependency" $
+          parseServiceCrateName (T.unlines
+            [ "[package]", "name = \"plain\""
+            , "[dependencies]", "serde = \"1.0\""
+            ]) `shouldBe` Nothing
+
+        it "rejects plexus mentioned only in a comment" $
+          parseServiceCrateName (T.unlines
+            [ "[package]", "name = \"sneaky\""
+            , "[dependencies]", "# plexus-core would be nice", "serde = \"1.0\""
+            ]) `shouldBe` Nothing
+
+        it "rejects when [package] has no name" $
+          parseServiceCrateName (T.unlines
+            [ "[package]", "version = \"0.1.0\""
+            , "[dependencies]", "plexus-core = \"1.0\""
+            ]) `shouldBe` Nothing
 
     -- ═══════════════════════════════════════════
     -- Section 14: Standalone config-driven build
