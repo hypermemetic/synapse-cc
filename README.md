@@ -8,9 +8,9 @@
 
 - 🔧 **Unified Interface**: Single command to generate clients from any backend
 - 🔍 **Smart Tool Discovery**: Finds local development builds or installed versions
-- ⚡ **Fast**: Smart caching avoids regeneration when schemas haven't changed (coming in Phase 3)
-- 🎯 **Multi-Language**: TypeScript, Python, Rust support (TypeScript in MVP)
-- 🛠️ **Complete Pipeline**: From schema → IR → generated code → compiled artifacts
+- ⚡ **Fast**: Incremental caching skips regeneration when schemas haven't changed (IR cache at `~/.cache/plexus-codegen/synapse/ir/`, per-file code cache via hub-codegen)
+- 🎯 **Multi-Language**: TypeScript and Rust today (`rust` requires a hub-codegen built with `--features rust`); `python` parses but has no generator yet
+- 🛠️ **Complete Pipeline**: schema → IR → generated code → installed deps → compiled artifact → smoke tests
 - 🔐 **Credential lifecycle**: Per-backend defaults store shared with `synapse` — set, inspect, and rotate JWTs / cookies / headers via `synapse-cc _self <backend> …`. Values held as reference URIs (`literal:`, `env://`, `file://`, `keychain://`) so secrets live in the OS keychain or env vars, not plaintext. JWT decoding flags expired tokens at a glance.
 
 ## Installation
@@ -36,61 +36,126 @@ The tool will automatically find them if they're:
 
 ## Usage
 
-### Basic TypeScript Client
+The CLI is subcommand-shaped:
 
 ```bash
-synapse-cc typescript substrate ws://localhost:4444
+synapse-cc init [BACKEND]                  # scaffold synapse.config.json
+synapse-cc build                           # build every target in synapse.config.json
+synapse-cc build TARGET BACKEND [OPTIONS]  # one-off build, no config file
+synapse-cc watch BACKEND [PLUGIN...]       # rebuild on schema changes
+synapse-cc wait [BACKEND]                  # block until backend(s) reachable
+synapse-cc _self BACKEND VERB ...          # credentials store (shared with synapse)
 ```
 
-This will:
-1. Connect to substrate at `ws://localhost:4444`
-2. Discover the schema
-3. Generate IR
-4. Generate TypeScript client
-5. Output to `./generated/`
+### Quickstart (config-driven)
 
-### Options
+A service scaffolded by `axon new` ships a `synapse.config.json` pre-pointed
+at itself — `synapse-cc build` works unedited from the service directory
+(server must be running). Real run:
+
+```
+$ synapse-cc build
+==> Discovering tools...
+[+] Found all required tools
+[i] Building "client" → src/lib/plexus
+
+==> Reading schema...
+[+] Schema ready (2 plugins)
+
+==> Generating code...
+[+] Code generated (11 files)
+
+==> Installing dependencies...
+[+] Dependencies installed
+
+==> Building...
+[+] Build passed
+
+==> Running tests...
+[+] Tests passed
+[+] client → src/lib/plexus/
+```
+
+Without a config file, `synapse-cc init <backend>` scaffolds one; with the
+backend argument omitted it is **inferred** — from a co-located Plexus
+service crate, then from the local registry — and the inference is
+announced. There is no silent default backend:
+
+```
+$ synapse-cc init
+[!] missing BACKEND argument — no co-located Plexus service crate found and
+    no backend discoverable on the registry at 127.0.0.1:4444.
+    Run: synapse-cc init <backend>
+```
+
+### Quickstart (one-off, no config)
 
 ```bash
-synapse-cc <target> <backend> <url> [OPTIONS]
-
-Arguments:
-  target    Target language (typescript, python, rust)
-  backend   Backend identifier (substrate, plexus, synapse, etc.)
-  url       Backend WebSocket URL (e.g., ws://localhost:4444)
-
-Options:
-  -o, --output DIR           Output directory (default: ./generated)
-  --bundle-transport BOOL    Bundle transport code (default: true)
-  --no-install              Skip dependency installation
-  --no-build                Skip compilation step
-  --cache-dir DIR           Cache directory (default: ~/.plexus/cache)
-  --force                   Force regeneration (ignore cache)
-  --watch                   Watch backend and regenerate on changes
-  --debug                   Enable debug logging
-  -h, --help                Show help message
+synapse-cc build typescript substrate          # TS client → ./generated/
+synapse-cc build rust substrate -o ./client    # Rust client, ends in cargo build
 ```
 
-### Examples
+The backend is resolved **by name via the registry** (endpoint from
+`PLEXUS_REGISTRY_URL`, default `ws://127.0.0.1:4444`; `-H`/`-P` set the
+fallback). A real `rust` run:
 
-**External transport mode** (uses `@plexus/rpc-client` package):
-```bash
-synapse-cc typescript substrate ws://localhost:4444 \
-  --bundle-transport=false \
-  --output ./packages/substrate-client
+```
+$ synapse-cc build rust zechodev -o ./rust-client
+==> Discovering tools...
+[+] Found all required tools
+
+==> Resolving zechodev via registry at ws://127.0.0.1:4444...
+
+==> Reading schema...
+[+] Schema ready (2 plugins)
+
+==> Generating code...
+[+] Code generated (5 files)
+
+==> Building...
+[+] Build passed
+
+==> Running tests...
+[+] Tests passed
+
+[+] Client → ./rust-client/
 ```
 
-**Skip build steps** (just generate code):
-```bash
-synapse-cc typescript substrate ws://localhost:4444 \
-  --no-install \
-  --no-build
+`-t rust` ends in a real `cargo build` of the generated crate (Z2H-7) — the
+artifact compiles or the command fails.
+
+### Options (build / watch)
+
+```
+  -o, --output DIR        Output directory (default: ./generated)
+  --transport ws|browser  ws (Node.js, default) or browser (native WebSocket,
+                          for Tauri/WebView)
+  --no-install            Skip dependency installation
+  --no-build              Skip compilation step
+  --no-tests              Skip running smoke tests
+  --cache-dir DIR         Cache directory (default: ~/.cache/plexus-codegen)
+  --force                 Force regeneration (ignore cache)
+  --debug                 Enable debug logging
+  --synapse PATH          synapse binary path (overrides discovery)
+  --hub-codegen PATH      hub-codegen binary path (overrides discovery)
+  -t, --token JWT         JWT auth token (see Credentials below)
+  --token-file PATH       Read JWT from file
+  -H, --host HOST         Registry/discovery host (default: 127.0.0.1)
+  -P, --port PORT         Registry/discovery port (default: 4444)
 ```
 
-**Debug mode**:
-```bash
-synapse-cc typescript substrate ws://localhost:4444 --debug
+### Rust target prerequisite
+
+`build rust` requires a hub-codegen binary compiled with the `rust` feature
+(`cargo build --release --features all` in the hub-codegen repo). A
+typescript-only binary fails with:
+
 ```
+[!] Error: hub-codegen failed (exit code 1)
+Error: Rust codegen not enabled. Rebuild with --features rust
+```
+
+Point `--hub-codegen` at a rust-enabled build if the discovered one is not.
 
 ### Credentials & Headers
 
@@ -136,19 +201,26 @@ synapse-cc (Haskell)
 ```
 synapse-cc/
 ├── synapse-cc.cabal         # Cabal project file
-├── PLAN.md                  # Detailed implementation plan
 ├── app/
-│   └── Main.hs              # Entry point
+│   └── Main.hs              # Entry point, subcommand dispatch
 └── src/
     └── SynapseCC/
-        ├── Types.hs         # Core types
-        ├── CLI.hs           # Command-line parsing
-        ├── Discover.hs      # Tool discovery
-        ├── Pipeline.hs      # Pipeline orchestration
-        ├── Process.hs       # Subprocess helpers
-        ├── Cache.hs         # Caching (Phase 3)
-        ├── Language.hs      # Language integration (Phase 2)
-        └── Logging.hs       # Pretty output
+        ├── Types.hs           # Core types, Options, synapse.config.json types
+        ├── CLI.hs             # Subcommand + option parsing
+        ├── Config.hs          # synapse.config.json load/init
+        ├── Detect.hs          # Project detection for `init` inference
+        ├── Discover.hs        # Tool discovery (synapse, hub-codegen)
+        ├── RegistryResolve.hs # Backend-name resolution via the registry
+        ├── Pipeline.hs        # Pipeline orchestration
+        ├── Process.hs         # Subprocess helpers
+        ├── Cache.hs           # Incremental IR caching
+        ├── Merge.hs           # Three-way merge bookkeeping
+        ├── Dependency.hs      # Plugin dependency resolution
+        ├── Language.hs        # Per-language install/build/test steps
+        ├── Auth.hs            # Token priority chain (wraps Synapse.Self)
+        ├── Watch.hs           # watch subcommand
+        ├── Wait.hs            # wait subcommand
+        └── Logging.hs         # Pretty output
 ```
 
 ### Building
@@ -160,45 +232,30 @@ cabal build
 ### Running from source
 
 ```bash
-cabal run synapse-cc -- typescript substrate ws://localhost:4444
+cabal run synapse-cc -- build typescript substrate --debug
 ```
 
 ### Testing
 
 ```bash
-# Ensure substrate is running
-cd ../plexus-substrate
-cargo run -- --port 4444
+# Scaffold and start a throwaway backend (any free port)
+axon new mysvc --port 4452 && cd mysvc && cargo run &
 
-# In another terminal, test synapse-cc
-cd ../synapse-cc
-cabal run synapse-cc -- typescript substrate ws://localhost:4444 --debug
+# Generate, compile, and smoke-test a client against it — the scaffold's
+# synapse.config.json is already pointed at ws://127.0.0.1:4452
+synapse-cc build
 ```
 
-## Roadmap
+## Status
 
-### Phase 1: MVP (Current)
-- ✅ Project scaffolding
-- ✅ Tool discovery
-- ✅ Pipeline orchestration
-- ✅ Basic error handling
-- [ ] End-to-end testing
+Shipped: tool discovery, pipeline orchestration, config-driven multi-target
+builds (`synapse.config.json`), incremental IR + code caching with three-way
+merge, dependency installation + compile + smoke-test steps (bun/npm for
+TypeScript, cargo for Rust), watch mode, `wait`, registry-based backend
+resolution (`PLEXUS_REGISTRY_URL`), shared credentials store (`_self`).
 
-### Phase 2: Language Integration
-- [ ] Dependency installation (npm, pip, cargo)
-- [ ] Build automation
-- [ ] Multi-package manager support
-
-### Phase 3: Smart Caching
-- [ ] Hash-based caching
-- [ ] Cache management
-- [ ] Fast iteration
-
-### Phase 4: Production Features
-- [ ] Watch mode
-- [ ] Progress indicators
-- [ ] Auto-install tools
-- [ ] Configuration files
+Not shipped: a `python` generator (the target parses; hub-codegen has no
+emitter), remote/distributed caching.
 
 ## Contributing
 

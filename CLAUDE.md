@@ -37,15 +37,25 @@ synapse-cc/
 │   └── Main.hs
 ├── src/                    # Library source
 │   └── SynapseCC/
-│       ├── Cache.hs        # IR cache management
-│       ├── CLI.hs          # Command-line interface
-│       ├── Dependency.hs   # Plugin dependency resolution
-│       ├── Discover.hs     # Tool discovery (synapse, hub-codegen)
-│       ├── Language.hs     # Target language types
-│       ├── Logging.hs      # Colored output and logging
-│       ├── Pipeline.hs     # Main orchestration pipeline
-│       ├── Process.hs      # Subprocess execution
-│       └── Types.hs        # Core types and errors
+│       ├── Auth.hs            # Token priority chain (wraps Synapse.Self)
+│       ├── AuthCheck.hs       # Pre-flight auth validation
+│       ├── Benchmark.hs       # Timing instrumentation
+│       ├── Cache.hs           # IR cache management
+│       ├── CLI.hs             # Subcommand + option parsing
+│       ├── Config.hs          # synapse.config.json load/init
+│       ├── Dependency.hs      # Plugin dependency resolution
+│       ├── Detect.hs          # Project detection for `init` inference
+│       ├── Discover.hs        # Tool discovery (synapse, hub-codegen)
+│       ├── Language.hs        # Per-language install/build/test steps
+│       ├── Lock.hs            # Concurrency lock for cache writes
+│       ├── Logging.hs         # Colored output and logging
+│       ├── Merge.hs           # Three-way merge bookkeeping
+│       ├── Pipeline.hs        # Main orchestration pipeline
+│       ├── Process.hs         # Subprocess execution
+│       ├── RegistryResolve.hs # Backend-name resolution via registry
+│       ├── Types.hs           # Core types and errors
+│       ├── Wait.hs            # wait subcommand
+│       └── Watch.hs           # watch subcommand
 ├── test/                   # Test suite
 │   └── Main.hs
 ├── docs/
@@ -65,24 +75,27 @@ synapse-cc is the **unified compiler toolchain** that orchestrates the complete 
 1. Tool Discovery
    ↓ Finds synapse and hub-codegen binaries
 
-2. Connect to Backend
-   ↓ Via Plexus RPC (default: localhost:4444)
+2. Resolve Backend
+   ↓ By name via the registry (PLEXUS_REGISTRY_URL, default
+   ↓ ws://127.0.0.1:4444; -H/-P set the fallback endpoint)
 
 3. Generate IR
-   ↓ Calls: synapse -H <host> -P <port> -i <backend>
-   ↓ Writes: ~/.cache/synapse/ir/<backend>/manifest.json
+   ↓ Via the plexus-synapse library (in-process)
+   ↓ Writes: ~/.cache/plexus-codegen/synapse/ir/<backend>/ir.json
+   ↓         ~/.cache/plexus-codegen/synapse/ir/<backend>/manifest.json
 
 4. Generate Code
    ↓ Calls: hub-codegen <ir.json> -o <output> -t <target>
-   ↓ Reads: ~/.cache/hub-codegen/<target>/<backend>/manifest.json
+   ↓ Reads: ~/.cache/plexus-codegen/hub-codegen/<target>/<backend>/manifest.json
    ↓ Three-way merge with conflict detection
-   ↓ Writes: ~/.cache/hub-codegen/<target>/<backend>/manifest.json
+   ↓ Writes: ~/.cache/plexus-codegen/hub-codegen/<target>/<backend>/manifest.json
 
-5. (Future) Compile Code
-   ↓ npm install, cargo build, etc.
+5. Install + Compile
+   ↓ typescript: bun/npm install + build; rust: cargo build (Z2H-7)
+   ↓ Skip with --no-install / --no-build
 
-6. (Future) Run Tests
-   ↓ npm test, cargo test, etc.
+6. Run Tests
+   ↓ Smoke tests for the generated client; skip with --no-tests
 ```
 
 ### Key Design Decisions
@@ -95,12 +108,12 @@ synapse-cc is the **unified compiler toolchain** that orchestrates the complete 
 
 **2. Two-Level Caching**
 
-- **IR Cache** (`~/.cache/synapse/ir/`): Managed by synapse-cc
+- **IR Cache** (`~/.cache/plexus-codegen/synapse/ir/`): Managed by synapse-cc
   - Tracks schema hashes from Plexus RPC backend
   - Detects when backend schema changes
   - Avoids redundant IR generation
 
-- **Code Cache** (`~/.cache/hub-codegen/`): Managed by hub-codegen
+- **Code Cache** (`~/.cache/plexus-codegen/hub-codegen/`): Managed by hub-codegen
   - Tracks generated file hashes
   - Detects user modifications via three-way merge
   - Preserves user code by default
@@ -179,16 +192,17 @@ Both synapse and synapse-cc share a per-backend defaults store at `~/.plexus/<ba
 **`_self` subcommand:** `synapse-cc _self <backend> <verb>` dispatches to `Synapse.Self.Command.runSelfCommand` — the identical handler that `synapse _self` uses. Both CLIs see the same file, produce the same output. Users can set credentials via either.
 
 **Verbs** (see synapse/README.md for the full reference):
-- `show` — inspects state, decodes JWTs, flags expired tokens
+- `show` — inspects state, decodes JWTs, flags expired tokens, shows OIDC login status/tenant
 - `set cookie|header <name> <value-or-uri>` — auto-wraps bare values as `literal:`
 - `set-from-stdin cookie|header <name>` — explicit literal, bypasses scheme heuristic
 - `unset`, `clear`, `resolve`, `import-token`
+- `login` / `logout` / `refresh` / `tenant` — OIDC login lifecycle (UT-3); expired access tokens are transparently refreshed via the stored refresh token on ordinary invocations
 
 **Legacy migration:** on first read of a backend that has `~/.plexus/tokens/<backend>` (pre-SELF convention) but no `defaults.json`, `Synapse.Self.loadDefaults` auto-migrates the JWT as `cookies.access_token = literal:<jwt>` and deletes the legacy file. Emits an INFO log naming both paths.
 
 **File permissions:** `writeDefaults` applies content-aware chmod — `0600` when the file contains any `literal:` value, `0644` otherwise. Parent directory mode `0700` when freshly created.
 
-**Deferred: keychain resolver.** `keychain://` URIs parse and appear in `show`, but the resolver returns "keychain backend disabled pending SELF-8" — user-attended rollout required. `set-secret` / `upgrade-to-keychain` / `import-token --to-keychain` are stubbed with the same message. The store is fully functional via `literal:`, `env://`, `file://` today.
+**Keychain status:** `keychain://` **reads** resolve on macOS (shell-out to the `security` CLI; Linux/Windows return a clear not-implemented error). The **write** verbs — `set-secret`, `upgrade-to-keychain`, `import-token --to-keychain` — are stubbed with a friendly "requires SELF-8" error. The store is fully functional via `literal:`, `env://`, `file://` today.
 
 Related tickets (all Complete except SELF-8): `synapse/plans/SELF/SELF-1..8.md`.
 
@@ -198,21 +212,24 @@ Related tickets (all Complete except SELF-8): `synapse/plans/SELF/SELF-1..8.md`.
 
 ### IR Cache Manifest
 
-**Location**: `~/.cache/synapse/ir/<backend>/manifest.json`
+**Location**: `~/.cache/plexus-codegen/synapse/ir/<backend>/manifest.json`
+(the cached IR itself sits next to it as `ir.json`)
 
-**Structure**:
+**Structure** (from `src/SynapseCC/Types.hs`):
 ```haskell
 data IRCacheManifest = IRCacheManifest
-  { ircmVersion     :: !Text
-  , ircmBackend     :: !Backend
-  , ircmToolchain   :: !ToolchainVersions
-  , ircmUpdatedAt   :: !Text
-  , ircmPlugins     :: !(Map Text IRPluginCache)
+  { ircmVersion    :: !Text
+  , ircmIRVersion  :: !Text
+  , ircmToolchain  :: !ToolchainVersions
+  , ircmUpdatedAt  :: !Text
+  , ircmPlugins    :: !(Map Text IRPluginCache)
   }
 
 data IRPluginCache = IRPluginCache
-  { ipcIRHash       :: !Text
-  , ipcSchemaHash   :: !Text
+  { ipcIRHash       :: !Text   -- Hash of the generated IR for this plugin
+  , ipcSchemaHash   :: !Text   -- Hash of the source schema (composite)
+  , ipcSelfHash     :: !Text   -- V2: methods-only hash (granular invalidation)
+  , ipcChildrenHash :: !Text   -- V2: children-only hash (granular invalidation)
   , ipcDependencies :: ![Text]
   , ipcCachedAt     :: !Text
   }
@@ -314,8 +331,9 @@ cabal install
 synapse-cc automatically finds development builds:
 
 ```bash
-# From synapse-cc directory
-cabal run synapse-cc -- typescript substrate -o /tmp/client
+# From synapse-cc directory (note the `build` subcommand — the old
+# subcommand-less form `synapse-cc typescript substrate` no longer parses)
+cabal run synapse-cc -- build typescript substrate -o /tmp/client
 
 # Finds:
 #   ../synapse/dist-newstyle/build/.../synapse
@@ -326,31 +344,20 @@ cabal run synapse-cc -- typescript substrate -o /tmp/client
 
 **Enable debug output**:
 ```bash
-synapse-cc --debug typescript substrate -o /tmp/client
-
-# Shows:
-#   [*] Discovering tools...
-#   [+] Found synapse at ../synapse/dist-newstyle/...
-#   [+] Found hub-codegen at ../hub-codegen/target/...
-#   [*] Running: synapse -H localhost -P 4444 -i substrate
-#   [*] Running: hub-codegen /tmp/ir.json -o /tmp/client -t typescript
+synapse-cc build typescript substrate -o /tmp/client --debug
 ```
 
 **Check cache status**:
 ```bash
 # View IR cache
-cat ~/.cache/synapse/ir/substrate/manifest.json | jq
+cat ~/.cache/plexus-codegen/synapse/ir/substrate/manifest.json | jq
 
 # View code cache
 cat ~/.cache/plexus-codegen/hub-codegen/typescript/substrate/manifest.json | jq
 ```
 
-**Clear caches**:
+**Clear caches** (both live under the same root):
 ```bash
-# Clear IR cache
-rm -rf ~/.cache/synapse/
-
-# Clear code cache
 rm -rf ~/.cache/plexus-codegen/
 ```
 
@@ -364,9 +371,11 @@ rm -rf ~/.cache/plexus-codegen/
 
 **Purpose**: Connects to Plexus RPC backends and generates IR JSON
 
-**Called by synapse-cc**:
+**Consumed by synapse-cc as a library** (`plexus-synapse` in `build-depends`;
+IR is built in-process via `Synapse.IR.Builder`). The equivalent standalone
+invocation, useful for debugging what synapse-cc sees:
 ```bash
-synapse -H localhost -P 4444 -i substrate --generator-info synapse-cc:0.1.0.0
+synapse --emit-ir -P 4444 substrate --generator-info synapse-cc:<version>
 ```
 
 **Output**: IR JSON file
@@ -411,26 +420,24 @@ cabal test
 **Manual testing workflow**:
 
 ```bash
-# 1. Start a Plexus RPC backend
-cd ../plexus-substrate
-cargo run --release -- --port 4444
+# 1. Start a Plexus RPC backend (axon scaffold works; any free port)
+axon new mysvc --port 4452 && cd mysvc && cargo run
 
-# 2. Generate client code
-cd ../synapse-cc
-cabal run synapse-cc -- typescript substrate -o /tmp/client
+# 2. Generate client code (from the scaffold dir, config-driven)
+synapse-cc build
+#    …or one-off: cabal run synapse-cc -- build typescript mysvc -o /tmp/client
 
 # 3. Verify output
-ls /tmp/client/
-cat ~/.cache/synapse/ir/substrate/manifest.json | jq
-cat ~/.cache/plexus-codegen/hub-codegen/typescript/substrate/manifest.json | jq
+cat ~/.cache/plexus-codegen/synapse/ir/mysvc/manifest.json | jq
+cat ~/.cache/plexus-codegen/hub-codegen/typescript/mysvc/manifest.json | jq
 
 # 4. Test cache hit
-cabal run synapse-cc -- typescript substrate -o /tmp/client
+synapse-cc build
 # Should be very fast (cache hit)
 
 # 5. Test conflict detection
-echo "// USER CODE" >> /tmp/client/cone/types.ts
-cabal run synapse-cc -- typescript substrate -o /tmp/client
+echo "// USER CODE" >> src/lib/plexus/greeter/types.ts
+synapse-cc build
 # Should show warning about modified file
 ```
 
@@ -467,12 +474,13 @@ cabal run synapse-cc -- typescript substrate -o /tmp/client
 
 See `docs/architecture/16675916618081268991_incremental-caching-system.md` for details:
 
-1. **V2 Granular Hashing**: Method-only vs children-only invalidation
-2. **Interactive Merge Mode**: User prompts for conflict resolution
-3. **Compile Step**: npm install, cargo build integration
-4. **Test Step**: npm test, cargo test integration
-5. **Watch Mode**: Auto-regenerate on schema changes
-6. **Remote Cache**: S3/GCS backend for distributed teams
+1. **Interactive Merge Mode**: User prompts for conflict resolution
+2. **Python generator**: the `python` target parses but hub-codegen has no emitter
+3. **Remote Cache**: S3/GCS backend for distributed teams
+
+Already shipped (formerly listed here as future): V2 granular hashing
+(`ipcSelfHash` / `ipcChildrenHash`), the compile step (bun/npm + cargo, Z2H-7),
+smoke tests, and watch mode (`synapse-cc watch`).
 
 ---
 
@@ -498,7 +506,6 @@ ls ~/.cargo/bin/
 
 **Solution**:
 ```bash
-rm -rf ~/.cache/synapse/
 rm -rf ~/.cache/plexus-codegen/
 ```
 
