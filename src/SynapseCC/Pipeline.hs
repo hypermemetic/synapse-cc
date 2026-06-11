@@ -711,9 +711,11 @@ generateIR config _tools = do
       regPort = read (T.unpack (cfgPort config)) :: Int
       generatorInfo = ["synapse-cc:" <> synapseCCVersion]
 
-  -- SAFE-3: resolve backend host:port via the registry.
-  -- The registry's location is taken from --host/--port (defaults: 127.0.0.1:4444).
-  resolution <- Registry.resolveBackendAddress regHost regPort bkName
+  -- SAFE-3 + Z2H-6: resolve backend host:port via the registry.
+  -- The registry endpoint comes from --host/--port; at their defaults,
+  -- PLEXUS_REGISTRY_URL may override (default ws://127.0.0.1:4444).
+  (effHost, effPort) <- Registry.resolveRegistryEndpoint regHost (cfgPort config)
+  resolution <- Registry.resolveBackendAddress effHost effPort bkName
   hpResult <- case resolution of
     Registry.ResolvedFromRegistry h p -> do
       logDebug debug $ "  Registry resolved " <> bkName <> " -> " <> h <> ":" <> T.pack (show p)
@@ -722,10 +724,13 @@ generateIR config _tools = do
       logDebug debug $ "  Registry unreachable; using provided address " <> h <> ":" <> T.pack (show p)
       pure $ Right (h, p)
     Registry.NotInRegistry known ->
+      -- Z2H-6: actionable error naming the registration step.
       pure $ Left $ BackendUnreachable bkName $
-        "Backend '" <> bkName <> "' not in registry. Known: "
+        "Backend '" <> bkName <> "' is not registered. Known: "
         <> (if null known then "<none>" else T.intercalate ", " known)
-        <> ". Hint: run 'synapse-cc init' to scaffold a synapse.config.json"
+        <> ". Backends self-register at startup — start '" <> bkName
+        <> "' (registry at $PLEXUS_REGISTRY_URL, default ws://127.0.0.1:4444),"
+        <> " or pass -H/-P to connect directly."
   case hpResult of
     Left e -> pure (Left e)
     Right (host, port) -> do

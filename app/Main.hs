@@ -14,6 +14,7 @@ import SynapseCC.Detect (ProjectHint(..), defaultDetectors)
 import SynapseCC.Discover
 import SynapseCC.Logging
 import SynapseCC.Pipeline
+import qualified SynapseCC.RegistryResolve as Registry
 import SynapseCC.Types
 import SynapseCC.Wait (runWait)
 import SynapseCC.Watch (runWatch)
@@ -76,8 +77,11 @@ main = do
 
         Right tools -> do
           logSuccess "Found all required tools"
+          -- Z2H-6: report the EFFECTIVE registry endpoint (PLEXUS_REGISTRY_URL
+          -- may override the default --host/--port).
+          (effHost, effPort) <- Registry.resolveRegistryEndpoint (cfgHost config) (cfgPort config)
           logStep $ "Resolving " <> backendName (cfgBackend config)
-                 <> " via registry at ws://" <> cfgHost config <> ":" <> cfgPort config <> "..."
+                 <> " via registry at ws://" <> effHost <> ":" <> T.pack (show effPort) <> "..."
 
           pipelineResult <- runPipeline config tools
           case pipelineResult of

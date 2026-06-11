@@ -21,10 +21,13 @@
 module SynapseCC.RegistryResolve
   ( ResolveResult(..)
   , resolveBackendAddress
+  , resolveRegistryEndpoint
   ) where
 
 import Control.Exception (try, SomeException)
 import Data.Text (Text)
+import qualified Data.Text as T
+import Text.Read (readMaybe)
 
 import qualified Synapse.Backend.Discovery as D
 
@@ -34,6 +37,22 @@ data ResolveResult
   | ResolvedFallback      !Text !Int  -- ^ Registry unreachable: falling back to provided address
   | NotInRegistry         ![Text]     -- ^ Backend not in registry; suggestions = known backend names
   deriving stock (Show, Eq)
+
+-- | Z2H-6: resolve the effective registry endpoint from the CLI flags.
+--
+-- When @--host@/@--port@ sit at their defaults (@127.0.0.1@/@4444@),
+-- the @PLEXUS_REGISTRY_URL@ env var (shared with plexus-transport's
+-- boot-time self-registration and synapse) may point the registry
+-- elsewhere. Explicit non-default flags always win.
+resolveRegistryEndpoint
+  :: Text  -- ^ cfg host (CLI --host, default "127.0.0.1")
+  -> Text  -- ^ cfg port (CLI --port, default "4444")
+  -> IO (Text, Int)
+resolveRegistryEndpoint cfgHost cfgPortText = do
+  let cfgPort = maybe D.defaultRegistryPort id (readMaybe (T.unpack cfgPortText))
+  if cfgHost == D.defaultRegistryHost && cfgPort == D.defaultRegistryPort
+    then D.registryEndpointFromEnv
+    else pure (cfgHost, cfgPort)
 
 -- | Resolve a backend name to a host:port using the registry at the
 -- provided address. Always returns SOMETHING — never throws.
