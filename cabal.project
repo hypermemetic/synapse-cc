@@ -2,3 +2,4 @@ packages: .
           ../plexus-protocol
           ../synapse
           ../synapse/synapse-types
+          ../connectome-hs
